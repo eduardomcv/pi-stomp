@@ -135,6 +135,7 @@ class AddPluginMessage:
     x: float  # mod-ui canvas X
     y: float  # mod-ui canvas Y
     bypassed: bool
+    instance_number: int | None = None  # mod-host's instance; fork patch P3 appends it, stock mod-ui omits it
 
 
 @dataclass
@@ -217,6 +218,16 @@ class MidiMapMessage:
         return (self.minimum, self.maximum)
 
 
+# mod-ui never starts a message with ':', so this cannot collide with the wire.
+CONNECTED_MARKER = ":connected"
+
+
+@dataclass
+class ConnectedMessage:
+    """The bridge opened a socket; mod-ui's connect dump follows. Queued in-band so
+    it orders against the replay it precedes."""
+
+
 @dataclass
 class UnknownMessage:
     """Message type we don't handle yet."""
@@ -244,12 +255,15 @@ WebSocketMessage = Union[
     DisconnectMessage,
     ParamSetMessage,
     MidiMapMessage,
+    ConnectedMessage,
     UnknownMessage,
 ]
 
 
 def parse_message(raw_message: str) -> WebSocketMessage:
     """Parse raw WebSocket message string into typed message object."""
+    if raw_message == CONNECTED_MARKER:
+        return ConnectedMessage()
     try:
         match raw_message.split(" ", 2):
             # Format: loading_start {empty} {modified}
@@ -310,15 +324,17 @@ def parse_message(raw_message: str) -> WebSocketMessage:
             case ["add_hw_port", port_name]:
                 return AddHwPortMessage(port_name=port_name, port_type="", is_output=False, title="", index=0)
 
-            # Format: add {instance} {uri} {x} {y} {bypassed} {sversion} {buildEnv}
+            # Format: add {instance} {uri} {x} {y} {bypassed} {sversion} {buildEnv} [{instanceNumber}]
             case ["add", instance_path, rest]:
                 parts = rest.split()
+                number = int(parts[6]) if len(parts) > 6 else -1
                 return AddPluginMessage(
                     instance=_bare_instance(instance_path),
                     uri=parts[0],
                     x=float(parts[1]),
                     y=float(parts[2]),
                     bypassed=int(parts[3]) != 0,
+                    instance_number=number if number >= 0 else None,
                 )
 
             # Format: patch_set {instance} {writable} {paramUri} {valueType} {value}

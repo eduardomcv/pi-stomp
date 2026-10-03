@@ -1,11 +1,13 @@
 """Unit tests for ws_protocol.parse_message."""
 
 from modalapi.ws_protocol import (
+    CONNECTED_MARKER,
     PatchSetMessage,
     AddHwPortMessage,
     AddPluginMessage,
     coalesce_param_sets,
     ConnectMessage,
+    ConnectedMessage,
     DisconnectMessage,
     LoadingEndMessage,
     LoadingStartMessage,
@@ -354,6 +356,30 @@ def test_add_plugin_non_int_bypass_is_unknown():
     assert isinstance(msg, UnknownMessage)
 
 
+def test_add_plugin_without_instance_number():
+    msg = parse_message("add /graph/drive http://uri 200.0 150.0 0 0_0_1_0 0")
+    assert isinstance(msg, AddPluginMessage)
+    assert msg.instance_number is None
+
+
+def test_add_plugin_carries_instance_number_as_eighth_field():
+    # Fork patch P3 appends mod-host's instance number; stock host.js reads 7 fields.
+    msg = parse_message("add /graph/drive http://uri 200.0 150.0 0 0_0_1_0 0 7")
+    assert msg == AddPluginMessage(
+        instance="drive", uri="http://uri", x=200.0, y=150.0, bypassed=False, instance_number=7
+    )
+
+
+def test_add_plugin_negative_instance_number_is_none():
+    msg = parse_message("add /graph/drive http://uri 200.0 150.0 0 0_0_1_0 0 -1")
+    assert isinstance(msg, AddPluginMessage)
+    assert msg.instance_number is None
+
+
+def test_add_plugin_malformed_instance_number_is_unknown():
+    assert isinstance(parse_message("add /graph/drive http://uri 200.0 150.0 0 0_0_1_0 0 x"), UnknownMessage)
+
+
 # ---------------------------------------------------------------------------
 # remove
 # ---------------------------------------------------------------------------
@@ -412,6 +438,20 @@ def test_plugin_pos_accepts_float_coordinates():
 
 def test_plugin_pos_missing_y_is_unknown():
     assert isinstance(parse_message("plugin_pos /graph/drive 900"), UnknownMessage)
+
+
+# ---------------------------------------------------------------------------
+# connect marker (queued by the bridge, never sent by mod-ui)
+# ---------------------------------------------------------------------------
+
+
+def test_connected_marker():
+    assert parse_message(CONNECTED_MARKER) == ConnectedMessage()
+
+
+def test_connected_marker_must_match_exactly():
+    assert isinstance(parse_message("connected"), UnknownMessage)
+    assert isinstance(parse_message(CONNECTED_MARKER + " "), UnknownMessage)
 
 
 # ---------------------------------------------------------------------------
