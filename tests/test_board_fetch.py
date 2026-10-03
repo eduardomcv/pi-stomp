@@ -173,10 +173,8 @@ def test_result_is_delivered_by_drain_only(fetcher):
 
 
 def test_worker_never_exits_the_process(fetcher, monkeypatch):
-    def fail(*_args, **_kwargs):
-        raise AssertionError("sys.exit called")
-
-    monkeypatch.setattr(sys, "exit", fail)
+    exits: list[tuple] = []
+    monkeypatch.setattr(sys, "exit", lambda *args: exits.append(args))
     with (
         patch("pistomp.httpclient.post", side_effect=ConnectionRefusedError("down")),
         patch("pistomp.httpclient.get", side_effect=ConnectionRefusedError("down")),
@@ -184,6 +182,7 @@ def test_worker_never_exits_the_process(fetcher, monkeypatch):
         fetcher.request_metadata([DRIVE])
         [result] = _wait_for(fetcher, 1)
     assert dict(result.info) == {}
+    assert exits == []
 
 
 def test_worker_survives_an_unexpected_error(fetcher):
