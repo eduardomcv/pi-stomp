@@ -5,12 +5,15 @@ import sys
 from pathlib import Path
 from types import MappingProxyType
 
-from modalapi.board_spec import BoardBuilder, PluginSpec
-from modalapi.ws_protocol import CONNECTED_MARKER, parse_message
+from common.parameter import BYPASS_SYMBOL, Symbol
+from modalapi.board_spec import BoardBuilder, MidiMapSpec, PluginSpec
+from modalapi.ws_protocol import CONNECTED_MARKER
 from tests.replay_helpers import feed, spec_of
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DRIVE = "http://example.com/fixture/drive"
+MODEL = "http://github.com/mikeoliphant/neural-amp-modeler-lv2#model"
+BPM = Symbol(":bpm")
 
 
 def _add(instance: str, x: float = 0.0, y: float = 0.0, *, bypassed: int = 0, number: int | None = None) -> str:
@@ -116,14 +119,39 @@ def test_disconnect_and_duplicate_connect():
 
 
 def test_freeze_is_a_snapshot_the_builder_cannot_reach():
-    builder = feed(BoardBuilder(), [_add("a")])
+    builder = feed(
+        BoardBuilder(),
+        [
+            _add("a"),
+            "param_set /graph/a gain 0.250000",
+            "midi_map /graph/a gain 0 61 0.0 1.0",
+            f"patch_set /graph/a 1 {MODEL} p /x.nam",
+            "midi_map /pedalboard :bpm 0 70 20.000000 280.000000",
+        ],
+    )
     spec = builder.freeze()
-    builder.apply(parse_message(_add("b")))
-    builder.apply(parse_message("param_set /graph/a gain 0.900000"))
+    feed(
+        builder,
+        [
+            _add("b"),
+            "param_set /graph/a gain 0.900000",
+            "midi_map /graph/a gain 0 62 0.0 1.0",
+            "midi_map /graph/a tone 0 63 0.0 1.0",
+            f"patch_set /graph/a 1 {MODEL} p /y.nam",
+            "midi_map /pedalboard :bpm -1 -1 0.0 1.0",
+        ],
+    )
+    a = spec.plugins["a"]
     assert list(spec.plugins) == ["a"]
-    assert dict(spec.plugins["a"].values) == {}
+    assert dict(a.values) == {Symbol("gain"): 0.25}
+    assert dict(a.midi) == {Symbol("gain"): MidiMapSpec(0, 61, 0.0, 1.0)}
+    assert dict(a.patches) == {MODEL: "/x.nam"}
+    assert dict(spec.transport_midi) == {BPM: MidiMapSpec(0, 70, 20.0, 280.0)}
     assert isinstance(spec.plugins, MappingProxyType)
-    assert isinstance(spec.plugins["a"].values, MappingProxyType)
+    assert isinstance(spec.transport_midi, MappingProxyType)
+    assert isinstance(a.values, MappingProxyType)
+    assert isinstance(a.midi, MappingProxyType)
+    assert isinstance(a.patches, MappingProxyType)
 
 
 def test_messages_outside_the_board_vocabulary_are_ignored():
@@ -141,3 +169,91 @@ def test_messages_outside_the_board_vocabulary_are_ignored():
 def test_board_spec_does_not_import_pedalboard():
     code = "import sys, modalapi.board_spec\nassert 'modalapi.pedalboard' not in sys.modules\n"
     subprocess.run([sys.executable, "-c", code], check=True, cwd=PROJECT_ROOT)
+
+
+def test_bypass_follows_the_add_then_param_set_bypass():
+    spec = spec_of(_add("a", bypassed=1), "param_set /graph/a :bypass 0.000000")
+    assert spec.plugins["a"].bypassed is False
+
+
+def test_param_set_records_the_last_value_per_symbol():
+    spec = spec_of(
+        _add("a"),
+        "param_set /graph/a gain 0.200000",
+        "param_set /graph/a gain 0.750000",
+        "param_set /graph/a tone 0.500000",
+    )
+    assert dict(spec.plugins["a"].values) == {Symbol("gain"): 0.75, Symbol("tone"): 0.5}
+
+
+def test_patch_set_keeps_the_raw_value_with_spaces():
+    spec = spec_of(_add("nam"), f"patch_set /graph/nam 1 {MODEL} p /data/NAM Models/Clean (G1).nam")
+    assert dict(spec.plugins["nam"].patches) == {MODEL: "/data/NAM Models/Clean (G1).nam"}
+
+
+def test_plugin_pos_moves_the_plugin():
+    spec = spec_of(_add("a", 100.0, 10.0), "plugin_pos /graph/a 900 40")
+    assert (spec.plugins["a"].x, spec.plugins["a"].y) == (900.0, 40.0)
+
+
+def test_midi_map_records_and_minus_one_unmaps():
+    mapped = spec_of(
+        _add("a"),
+        "midi_map /graph/a gain 0 61 0.200000 0.800000",
+        "midi_map /graph/a :bypass 0 60 0.0 1.0",
+    )
+    midi = mapped.plugins["a"].midi
+    assert midi[Symbol("gain")] == MidiMapSpec(channel=0, controller=61, minimum=0.2, maximum=0.8)
+    assert midi[Symbol("gain")].binding == "0:61"
+    assert midi[Symbol("gain")].binding_range == (0.2, 0.8)
+    assert midi[BYPASS_SYMBOL].binding == "0:60"
+
+    unmapped = spec_of(
+        _add("a"),
+        "midi_map /graph/a gain 0 61 0.200000 0.800000",
+        "midi_map /graph/a :bypass 0 60 0.0 1.0",
+        "midi_map /graph/a gain -1 -1 0.0 1.0",
+        "midi_map /graph/a :bypass -1 -1 0.0 1.0",
+    )
+    assert dict(unmapped.plugins["a"].midi) == {}
+
+
+def test_degenerate_midi_range_is_no_binding_range():
+    assert MidiMapSpec(channel=0, controller=1, minimum=1.0, maximum=1.0).binding_range is None
+
+
+def test_transport_pseudo_instance_keeps_only_its_midi_maps():
+    spec = spec_of(
+        "midi_map /pedalboard :bpm 0 70 20.000000 280.000000",
+        "midi_map /pedalboard :rolling 0 71 0.000000 1.000000",
+        "param_set /pedalboard :bpm 96.000000",
+        "midi_map /pedalboard :rolling -1 -1 0.0 1.0",
+    )
+    assert dict(spec.plugins) == {}
+    assert dict(spec.transport_midi) == {BPM: MidiMapSpec(channel=0, controller=70, minimum=20.0, maximum=280.0)}
+
+
+def test_a_new_window_drops_the_previous_transport_maps():
+    builder = feed(BoardBuilder(), ["midi_map /pedalboard :bpm 0 70 20.000000 280.000000"])
+    spec = feed(builder, ["loading_start 0 0", "loading_end 0 Rig"]).freeze()
+    assert dict(spec.transport_midi) == {}
+
+
+def test_value_messages_for_an_instance_not_on_the_board_are_dropped():
+    spec = spec_of(
+        _add("a"),
+        "remove /graph/a",
+        "param_set /graph/a gain 0.500000",
+        "param_set /graph/a :bypass 1.000000",
+        f"patch_set /graph/a 1 {MODEL} p /x.nam",
+        "plugin_pos /graph/a 1 2",
+        "midi_map /graph/a gain 0 61 0.0 1.0",
+    )
+    assert dict(spec.plugins) == {}
+
+
+def test_pedalboard_reexports_the_transport_instance_id():
+    import modalapi.board_spec as board_spec
+    import modalapi.pedalboard as pedalboard
+
+    assert pedalboard.TRANSPORT_INSTANCE_ID == board_spec.TRANSPORT_INSTANCE_ID == "pedalboard"

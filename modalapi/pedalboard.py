@@ -25,6 +25,7 @@ from typing import Optional
 
 from common.parameter import BYPASS_SYMBOL, TTL_INTEGER, MidiCC, Parameter, PortInfo, Symbol, json_default
 import modalapi.plugin as Plugin
+from modalapi.board_spec import TRANSPORT_INSTANCE_ID
 from modalapi.connections import Connection, build_connection
 from modalapi.plugin_customization import Customizer, default_customizer
 
@@ -32,9 +33,7 @@ from modalapi.plugin_customization import Customizer, default_customizer
 # mod-ui addresses pedalboard-level transport controls through a pseudo-instance
 # "/pedalboard" (id 9995) with virtual port symbols :bpm, :bpb, :rolling. We
 # mirror it as a synthetic Plugin so the binding/label machinery treats them
-# like effect params. Keep the bare id in sync with mod-ui's PEDALBOARD_INSTANCE.
-TRANSPORT_INSTANCE_ID = "pedalboard"
-
+# like effect params.
 BPM_SYMBOL = Symbol(":bpm")
 BPB_SYMBOL = Symbol(":bpb")
 ROLLING_SYMBOL = Symbol(":rolling")

@@ -31,10 +31,18 @@ from modalapi.ws_protocol import (
     DisconnectMessage,
     LoadingEndMessage,
     LoadingStartMessage,
+    MidiMapMessage,
+    ParamSetMessage,
+    PatchSetMessage,
+    PluginBypassMessage,
+    PluginPosMessage,
     RemovePluginMessage,
     ResetMessage,
     WebSocketMessage,
 )
+
+# mod-ui's PEDALBOARD_INSTANCE ("/pedalboard", id 9995) in bare form; keep the two in sync.
+TRANSPORT_INSTANCE_ID = "pedalboard"
 
 
 @dataclass(frozen=True)
@@ -117,6 +125,13 @@ def _instance_of(port: str) -> str | None:
     return instance if sep else None
 
 
+def _midi_spec(msg: MidiMapMessage) -> MidiMapSpec | None:
+    # mod-ui reports an unmap as channel and controller -1 (host.py midi unmap paths).
+    if msg.channel < 0 or msg.controller < 0:
+        return None
+    return MidiMapSpec(msg.channel, msg.controller, msg.minimum, msg.maximum)
+
+
 class BoardBuilder:
     """Folds mod-ui's board-scoped messages into a BoardSpec. Pure: the caller
     decides which messages reach it; the builder only mirrors what they say."""
@@ -141,6 +156,9 @@ class BoardBuilder:
         self._title = msg.title
 
     def apply(self, msg: WebSocketMessage) -> None:
+        """Fold one message in. A message naming an instance the board does not hold
+        is dropped; that covers /pedalboard, whose values ride the transport broadcast.
+        Only its MIDI maps are board state."""
         match msg:
             case AddPluginMessage():
                 self._plugins[msg.instance] = _PluginDraft(msg.uri, msg.x, msg.y, msg.bypassed, msg.instance_number)
@@ -153,6 +171,20 @@ class BoardBuilder:
                     self._connections[(msg.port_from, msg.port_to)] = None
             case DisconnectMessage():
                 self._connections.pop((msg.port_from, msg.port_to), None)
+            case PluginBypassMessage():
+                if (draft := self._plugins.get(msg.instance)) is not None:
+                    draft.bypassed = msg.bypassed
+            case ParamSetMessage():
+                if (draft := self._plugins.get(msg.instance)) is not None:
+                    draft.values[msg.symbol] = msg.value
+            case PatchSetMessage():
+                if (draft := self._plugins.get(msg.instance)) is not None:
+                    draft.patches[msg.param_uri] = msg.value
+            case PluginPosMessage():
+                if (draft := self._plugins.get(msg.instance)) is not None:
+                    draft.x, draft.y = msg.x, msg.y
+            case MidiMapMessage():
+                self._map(msg)
             case _:
                 pass
 
@@ -171,6 +203,19 @@ class BoardBuilder:
     def _holds(self, port: str) -> bool:
         instance = _instance_of(port)
         return instance is None or instance in self._plugins
+
+    def _map(self, msg: MidiMapMessage) -> None:
+        if msg.instance == TRANSPORT_INSTANCE_ID:
+            target = self._transport_midi
+        elif (draft := self._plugins.get(msg.instance)) is not None:
+            target = draft.midi
+        else:
+            return
+        spec = _midi_spec(msg)
+        if spec is None:
+            target.pop(msg.symbol, None)
+        else:
+            target[msg.symbol] = spec
 
     def _remove(self, instance: str) -> None:
         self._plugins.pop(instance, None)
