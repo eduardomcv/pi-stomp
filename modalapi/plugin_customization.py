@@ -103,6 +103,14 @@ class Customizer(Protocol):
     ) -> PluginCustomization: ...
 
 
+class PatchParser(Protocol):
+    """Extra data from a streamed `patch_set`, or None if nothing owns the property.
+    `plugins.customization.patch_extra_data` is the production one; `Pedalboard`
+    takes it injected so it never imports `plugins`."""
+
+    def __call__(self, uri: str | None, param_uri: str, value: str) -> PluginExtraData | None: ...
+
+
 def default_customizer(
     uri: str | None,  # noqa: ARG001
     bundlepath: str = "",  # noqa: ARG001

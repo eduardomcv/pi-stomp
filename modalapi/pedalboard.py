@@ -20,14 +20,17 @@ import logging
 import pistomp.httpclient as req
 import sys
 import urllib.parse
+from collections.abc import Mapping
+from dataclasses import replace
 from typing import Optional
 
 
-from common.parameter import BYPASS_SYMBOL, TTL_INTEGER, MidiCC, Parameter, PortInfo, Symbol, json_default
+from common.parameter import BYPASS_SYMBOL, TTL_INTEGER, MidiCC, Parameter, PortInfo, Ranges, Symbol, json_default
 import modalapi.plugin as Plugin
-from modalapi.board_spec import TRANSPORT_INSTANCE_ID
+from modalapi.board_spec import TRANSPORT_INSTANCE_ID, BoardSpec, MidiMapSpec
 from modalapi.connections import Connection, build_connection
-from modalapi.plugin_customization import Customizer, default_customizer
+from modalapi.plugin_customization import Customizer, PatchParser, default_customizer
+from modalapi.ws_protocol import TransportMessage
 
 
 # mod-ui addresses pedalboard-level transport controls through a pseudo-instance
@@ -88,6 +91,25 @@ def _control_inputs(plugin_info: dict | None) -> list[PortInfo] | None:
         return (plugin_info or {})["ports"]["control"]["input"]
     except (KeyError, TypeError):
         return None
+
+
+def _port_default(pp: PortInfo) -> float:
+    # A board load streams only values that differ from the plugin's default.
+    ranges = pp.get("ranges") or Ranges()
+    return float(ranges.get("default", ranges.get("minimum", 0.0)))
+
+
+def _time_info(transport: TransportMessage | None, midi: Mapping[Symbol, MidiMapSpec]) -> dict:
+    """hydrate's timeInfo block rebuilt from the stream: values from the transport
+    broadcast, bindings from the /pedalboard MIDI maps."""
+    time_info: dict = {}
+    if transport is not None:
+        time_info.update(bpb=transport.beats_per_bar, bpm=transport.bpm, rolling=transport.rolling)
+    for key, symbol in (("bpbCC", BPB_SYMBOL), ("bpmCC", BPM_SYMBOL), ("rollingCC", ROLLING_SYMBOL)):
+        mapping = midi.get(symbol)
+        if mapping is not None:
+            time_info[key] = MidiCC(channel=mapping.channel, control=mapping.controller)
+    return time_info
 
 
 class Pedalboard:
@@ -153,6 +175,94 @@ class Pedalboard:
         lo = float(cc.get("minimum", 0.0))
         hi = float(cc.get("maximum", 1.0))
         return (lo, hi) if hi > lo else None
+
+    @classmethod
+    def from_spec(
+        cls,
+        spec: BoardSpec,
+        plugin_dict: Mapping[str, dict],
+        bundle: str | None,
+        title: str,
+        transport: TransportMessage | None,
+        customizer: Customizer,
+        patch_parser: PatchParser,
+    ) -> "Pedalboard":
+        """A board from mod-ui's stream. Pure: metadata comes from `plugin_dict`,
+        extra data from the streamed patch values, nothing from disk or REST."""
+        pb = cls(title, bundle, customizer=customizer)
+        all_plugins: list[Plugin.Plugin] = []
+        instance_to_info: dict[str, Optional[dict]] = {}
+
+        for ps in spec.plugins.values():
+            plugin_info = plugin_dict.get(ps.uri)
+
+            category = None
+            cat = (plugin_info or {}).get("category")
+            if cat is not None and len(cat) > 0:
+                category = cat[0]
+
+            bypass_map = ps.midi.get(BYPASS_SYMBOL)
+            parameters: dict[Symbol, Parameter] = {
+                BYPASS_SYMBOL: Parameter(
+                    _bypass_info(),
+                    1.0 if ps.bypassed else 0.0,
+                    bypass_map.binding if bypass_map else None,
+                    ps.instance,
+                )
+            }
+
+            plugin_params = _control_inputs(plugin_info)
+            if plugin_params is None:
+                logging.warning("plugin port info not found, could be missing LV2 for: %s", ps.instance)
+                plugin_params = []
+
+            for pp in plugin_params:
+                symbol = Symbol(pp["symbol"])
+                mapping = ps.midi.get(symbol)
+                parameters[symbol] = Parameter(
+                    pp,
+                    ps.values.get(symbol, _port_default(pp)),
+                    mapping.binding if mapping else None,
+                    ps.instance,
+                    binding_range=mapping.binding_range if mapping else None,
+                )
+
+            customization = customizer(ps.uri)
+            for param_uri, value in ps.patches.items():
+                extra = patch_parser(ps.uri, param_uri, value)
+                if extra is not None:
+                    customization = replace(customization, extra_data=extra)
+
+            inst = Plugin.Plugin(
+                ps.instance,
+                parameters,
+                plugin_info,
+                category,
+                uri=ps.uri,
+                customization=customization,
+                instance_number=ps.instance_number,
+            )
+            inst.canvas_x = ps.x
+            inst.canvas_y = ps.y
+            inst.pedalboard_snapshot = {sym: float(p.value) for sym, p in parameters.items()}
+            instance_to_info[ps.instance] = plugin_info
+            all_plugins.append(inst)
+
+        pb.plugins = sorted(all_plugins, key=lambda p: (p.canvas_x, p.canvas_y, p.instance_id))
+        pb.connections = [
+            build_connection(src.removeprefix("/graph/"), dst.removeprefix("/graph/"), "", instance_to_info)
+            for src, dst in spec.connections
+        ]
+        pb.transport_plugin = pb._build_transport_plugin(_time_info(transport, spec.transport_midi))
+        pb.hydrated = True
+        return pb
+
+    @classmethod
+    def empty(cls, customizer: Customizer | None = None) -> "Pedalboard":
+        """The board mod-ui holds after a reset: untitled, unsaved, no plugins."""
+        pb = cls("", None, customizer=customizer)
+        pb.hydrated = True
+        return pb
 
     def hydrate(self, plugin_dict) -> None:
         """Populate plugins and connections from mod-ui. Idempotent."""
