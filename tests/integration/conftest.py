@@ -13,6 +13,7 @@ import pytest
 from pistomp.config import load_cfg_from_file
 
 from tests.conftest import FakeWebSocketBridge
+from tests.fake_board_fetcher import FakeBoardFetcher
 from tests.types import CapturedLcd, SystemFixture
 import common.token as Token
 
@@ -97,6 +98,8 @@ def _build_stack(
         mock_audiocard = MagicMock()
         mock_audiocard.get_volume_parameter.return_value = 0.0
         handler = Modhandler(mock_audiocard, cwd, data_dir=str(data_dir))
+        handler.board_fetcher.cleanup()
+        handler.board_fetcher = FakeBoardFetcher()
         handler.software_version = "3.0.0"
         handler.recovery_available = False  # no pistomp-recovery in test env
         assert isinstance(handler.settings, MagicMock)

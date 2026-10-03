@@ -276,6 +276,17 @@ case mod-ui abandons its own window, an aborted load returning before `loading_e
 Nothing else may raise it: a window that nothing closes refuses every send for the
 rest of the session.
 
+### Live plugin add
+
+An `add` for a plugin not yet in the model builds its tile at once when the URI is
+already in `plugin_dict`. Otherwise the add is parked in `PendingAdds` and
+`BoardFetcher` (one daemon thread) resolves the metadata: `POST effect/bulk/`, then
+`GET effect/get` per URI mod-ui omitted. Results are drained at the end of every
+`poll_ws_messages()`. Later `param_set`, bypass echo, `midi_map`, `patch_set`,
+`connect` and `disconnect` for the instance wait and replay in order once the plugin
+exists; a `remove`, a `loading_start` or a board change drops the pending add. A
+plugin whose metadata cannot be fetched becomes a bypass-only tile.
+
 ## Pedalboard Data Loading
 
 LILV parses `.ttl` files in the pedalboard bundle into `Pedalboard` → `Plugin` →

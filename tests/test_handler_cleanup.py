@@ -17,5 +17,7 @@ class TestModhandlerCleanup:
         h.external_midi = MagicMock()
         h.ethernet_manager = MagicMock()
         h.ws_bridge = MagicMock()
+        h.board_fetcher = MagicMock()
         h.cleanup()
         h.external_midi.close.assert_called_once()
+        h.board_fetcher.cleanup.assert_called_once()
