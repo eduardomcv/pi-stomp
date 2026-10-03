@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from common.parameter import BYPASS_SYMBOL, Symbol
-from modalapi.board_spec import BoardSpec
+from modalapi.board_spec import BoardBuilder, BoardSpec
 from modalapi.connections import EndpointKind
 from modalapi.pedalboard import BPB_SYMBOL, BPM_SYMBOL, ROLLING_SYMBOL, Pedalboard
 from modalapi.plugin_customization import (
@@ -20,12 +20,15 @@ from modalapi.plugin_customization import (
     default_customizer,
 )
 from modalapi.ws_protocol import TransportMessage
-from tests.replay_helpers import spec_of
+from plugins.customization import lookup, patch_extra_data
+from plugins.nam import NamData
+from tests.replay_helpers import board_to_replay_lines, feed, load_plugin_info, load_replay, spec_of
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CHORUS = "http://example.com/fixture/chorus"
 SPLIT = "http://example.com/fixture/split"
 NOTES_TEXT = "http://example.com/fixture/notes#text"
+NAM_PATH = "/home/pistomp/data/user-files/NAM Models/Clean (G1 L0 B1 T1).nam"
 
 INFO: dict[str, dict] = {
     CHORUS: {
@@ -246,3 +249,65 @@ def test_pedalboard_never_imports_plugins():
         "assert not bad, bad\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True, cwd=PROJECT_ROOT)
+
+
+def _replayed(
+    *names: str, customizer: Customizer = default_customizer, patch_parser: PatchParser = _no_patch
+) -> Pedalboard:
+    builder = BoardBuilder()
+    for name in names:
+        feed(builder, load_replay(name))
+    spec = builder.freeze()
+    bundle = None if spec.empty else "/home/pistomp/data/.pedalboards/Fixture_Rig.pedalboard"
+    return Pedalboard.from_spec(spec, load_plugin_info(), bundle, spec.title, None, customizer, patch_parser)
+
+
+def _summary(pb: Pedalboard) -> list[tuple]:
+    return [
+        (
+            p.instance_id,
+            p.uri,
+            p.canvas_x,
+            p.canvas_y,
+            p.instance_number,
+            p.is_bypassed(),
+            {s: (q.value, q.binding, q.minimum, q.maximum) for s, q in p.parameters.items()},
+        )
+        for p in [*pb.plugins, pb.transport_plugin]
+    ]
+
+
+def test_board_load_and_saved_connect_dump_build_the_same_board():
+    loaded = _replayed("board_load.txt")
+    replayed = _replayed("connect_dump_saved.txt")
+    assert _summary(loaded) == _summary(replayed)
+    assert set(loaded.connections) == set(replayed.connections)
+
+
+def test_unsaved_dump_builds_the_untitled_scratch_board():
+    pb = _replayed("connect_dump_unsaved.txt")
+    assert (pb.title, pb.bundle) == ("", None)
+    assert [p.instance_id for p in pb.plugins] == ["drive", "drive_2", "mystery"]
+    assert [p.instance_number for p in pb.plugins] == [0, 1, 2]
+    assert list(pb.plugins[2].parameters) == [BYPASS_SYMBOL]
+    assert pb.plugins[1].is_bypassed()
+
+
+def test_stream_names_the_nam_model_without_effect_ttl():
+    pb = _replayed("board_load.txt", customizer=lookup, patch_parser=patch_extra_data)
+    nam = pb.find_plugin("neural_amp_modeler_lv2_1")
+    assert nam is not None
+    assert nam.extra_data == NamData(model_path=NAM_PATH)
+
+
+def test_board_to_replay_lines_round_trips_through_the_builder():
+    pb = _replayed("connect_dump_saved.txt")
+    lines = board_to_replay_lines(pb, False, False, 0)
+    assert lines[0] == "transport 0 4.000000 120.000000 none"
+    assert lines[1] == "loading_start 0 0"
+    assert lines[-1] == "loading_end 0 Fixture Rig"
+    again = Pedalboard.from_spec(
+        feed(BoardBuilder(), lines).freeze(), load_plugin_info(), pb.bundle, pb.title, None, default_customizer, _no_patch
+    )
+    assert _summary(again) == _summary(pb)
+    assert set(again.connections) == set(pb.connections)
