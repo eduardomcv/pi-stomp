@@ -9,6 +9,7 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 
 from modalapi.websocket_bridge import AsyncWebSocketBridge, WebSocketWorker
+from modalapi.ws_protocol import CONNECTED_MARKER
 from common.parameter import BYPASS_SYMBOL, Symbol
 
 
@@ -426,3 +427,59 @@ def test_reconnect_discards_queued_messages(monkeypatch):
 
     assert worker.command_queue.empty()
     assert ws.sent == []
+
+
+class _DumpThenCloseWs(_SendWs):
+    """Replays `lines`, then closes, ending one pass through the connect scope."""
+
+    def __init__(self, worker: WebSocketWorker, lines: list[str], *, last: bool = True):
+        super().__init__()
+        self._worker = worker
+        self._lines = list(lines)
+        self._last = last
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        if self._lines:
+            return self._lines.pop(0)
+        if self._last:
+            self._worker.running = False
+        raise websockets.exceptions.ConnectionClosed(None, None)
+
+
+def _received(worker: WebSocketWorker) -> list[str]:
+    out: list[str] = []
+    while not worker.received_queue.empty():
+        out.append(worker.received_queue.get_nowait())
+    return out
+
+
+def test_connect_marker_precedes_the_connect_dump(monkeypatch):
+    worker = _make_worker()
+    worker.running = True
+    ws = _DumpThenCloseWs(worker, ["loading_start 0 0", "loading_end 0 Rig"])
+    monkeypatch.setattr(websockets, "connect", lambda *a, **k: _FakeConnect(ws))
+
+    asyncio.run(worker._async_worker())
+
+    assert _received(worker) == [CONNECTED_MARKER, "loading_start 0 0", "loading_end 0 Rig"]
+    assert worker.messages_received == 2
+
+
+def test_every_connect_gets_its_own_marker(monkeypatch):
+    worker = _make_worker()
+    worker.running = True
+    sockets = iter(
+        [
+            _DumpThenCloseWs(worker, ["loading_end 0 A"], last=False),
+            _DumpThenCloseWs(worker, ["loading_end 0 B"]),
+        ]
+    )
+    monkeypatch.setattr(websockets, "connect", lambda *a, **k: _FakeConnect(next(sockets)))
+
+    asyncio.run(worker._async_worker())
+
+    assert _received(worker) == [CONNECTED_MARKER, "loading_end 0 A", CONNECTED_MARKER, "loading_end 0 B"]
+    assert worker.take_reconnects() == 1

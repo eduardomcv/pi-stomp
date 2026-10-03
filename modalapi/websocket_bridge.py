@@ -34,6 +34,7 @@ import websockets
 import uvloop
 from common.parameter import Symbol
 from common.util import TEARDOWN_JOIN_S
+from modalapi.ws_protocol import CONNECTED_MARKER
 
 # Service will restart after this
 MAX_RECONNECT_ATTEMPTS = 4
@@ -142,6 +143,8 @@ class WebSocketWorker:
                         self._reconnect_events.put(None)
                     else:
                         self._has_connected = True
+                    # Ahead of the receive task, so it precedes the connect dump.
+                    self.received_queue.put(CONNECTED_MARKER)
                     logging.info(f"WebSocket connected to {self.ws_url}")
                     retry_delay = 1.0  # Reset on successful connect
                     reconnect_attempts = 0  # Reset attempts on success
