@@ -174,7 +174,9 @@ parameter values, and tap-tempo BPM.
 The WebSocket bridge (`AsyncWebSocketBridge`) runs a daemon thread with
 exponential-backoff reconnection. Outbound messages go into an unbounded queue;
 inbound messages are drained by `poll_ws_messages()` on every tick. `output_set`
-meter/scope messages are dropped at reception.
+meter/scope messages are dropped at reception. On every (re)connect the bridge queues a
+synthetic `:connected` marker (`CONNECTED_MARKER`, parsed to `ConnectedMessage`) ahead of
+mod-ui's connect dump; mod-ui never sends it, and `messages_received` does not count it.
 
 ### Inbound messages
 
@@ -183,12 +185,14 @@ meter/scope messages are dropped at reception.
 | `param_set …/:bypass v` | `PluginBypassMessage` | Set bypass, redraw |
 | `param_set …/{sym} v` | `ParamSetMessage` | `Plugin.set_param_value`: cache value + mirror onto any bound control |
 | `add {inst} … {bypassed} …` | `AddPluginMessage` | Connect/reconnect dump only; bypass in field 4 |
-| `loading_end {snapshot}` | `LoadingEndMessage` | Stash snapshot index for file-watch path |
+| `loading_end {snapshot} {title}` | `LoadingEndMessage` | Keep title on the message; stash snapshot index for file-watch path |
 | `pedal_snapshot {id} {name}` | `PedalSnapshotMessage` | In-board snapshot change |
 
 `ws_protocol.py` parses raw text into typed dataclasses — plus several
-recognized-but-mostly-ignored kinds (`LoadingStartMessage`, `SizeMessage`,
-`AddHwPortMessage`, `TrueBypassMessage`, `MidiMapMessage`, …); anything else becomes
+recognized-but-mostly-ignored kinds (`LoadingStartMessage`, which carries
+`empty`/`modified` flags, `ResetMessage` (`remove :all`), `PluginPosMessage`,
+`ConnectedMessage`, `SizeMessage`, `AddHwPortMessage`, `TrueBypassMessage`,
+`MidiMapMessage`, …); anything else becomes
 `UnknownMessage`. `ping` messages receive a `pong` reply; `data_ready` messages are
 echoed back.
 

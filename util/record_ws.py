@@ -17,10 +17,11 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with pi-stomp.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Record mod-ui's WebSocket feed as a replay fixture: one message per line, as
-pi-stomp's bridge queues them. Connecting makes mod-ui replay its connect dump, so
---windows 1 captures that alone; load a board in the web UI during a --windows 2
-capture to get `remove :all` and the load window too."""
+"""Record mod-ui's WebSocket feed as a replay fixture: one wire line per message,
+filtered as pi-stomp's bridge filters them. The bridge's synthetic connect marker is
+not included; prepend CONNECTED_MARKER to model a connect. Connecting makes mod-ui
+replay its connect dump, so --windows 1 captures that alone; load a board in the web
+UI during a --windows 2 capture to get `remove :all` and the load window too."""
 
 from __future__ import annotations
 

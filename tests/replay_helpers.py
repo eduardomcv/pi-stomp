@@ -33,7 +33,8 @@ def spec_of(*lines: str) -> BoardSpec:
 
 
 def load_replay(name: str) -> list[str]:
-    """One queued wire message per line. A trailing space is part of the wire."""
+    """mod-ui wire lines, filtered as the bridge filters them; no synthetic connect marker
+    (prepend CONNECTED_MARKER to model a connect). A trailing space is part of the wire."""
     return (REPLAY_DIR / name).read_text(encoding="utf-8").splitlines()
 
 
