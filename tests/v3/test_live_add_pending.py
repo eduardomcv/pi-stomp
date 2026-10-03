@@ -184,3 +184,53 @@ def test_handler_cleanup_closes_the_fetcher(parallel_beths_system: SystemFixture
     fetcher = _fetcher(parallel_beths_system)
     parallel_beths_system.handler.cleanup()
     assert fetcher.closed
+
+
+def test_one_failed_build_does_not_lose_the_other_resolved_plugin(parallel_beths_system: SystemFixture, monkeypatch):
+    system = parallel_beths_system
+    _serve(system)
+    fetcher = _fetcher(system)
+    fetcher.hold = True
+    handler = system.handler
+    insert = handler._insert_plugin
+
+    def flaky(msg, info):
+        if msg.instance == "ExtraChorus":
+            raise RuntimeError("customizer blew up")
+        insert(msg, info)
+
+    monkeypatch.setattr(handler, "_insert_plugin", flaky)
+
+    system.ws_bridge.inject(CHORUS_ADD)
+    system.ws_bridge.inject(f"add /graph/ExtraChorus2 {_EXTRA_CHORUS_URI} 950.0 50.0 0 1 1")
+    system.ws_bridge.inject("param_set /graph/ExtraChorus2 rate 3.500000")
+    handler.poll_ws_messages()
+    fetcher.release()
+    handler.poll_ws_messages()
+
+    assert "ExtraChorus" not in _ids(system)
+    added = next(p for p in handler.current.pedalboard.plugins if p.instance_id == "ExtraChorus2")
+    assert added.parameters[Symbol("rate")].value == pytest.approx(3.5)
+
+
+def test_a_failed_redraw_does_not_escape_the_tick(parallel_beths_system: SystemFixture, monkeypatch):
+    system = parallel_beths_system
+    _serve(system)
+    fetcher = _fetcher(system)
+    fetcher.hold = True
+    handler = system.handler
+
+    def broken_draw():
+        raise RuntimeError("lcd gone")
+
+    monkeypatch.setattr(handler.lcd, "draw_main_panel", broken_draw)
+
+    system.ws_bridge.inject(CHORUS_ADD)
+    system.ws_bridge.inject("param_set /graph/ExtraChorus rate 3.500000")
+    handler.poll_ws_messages()
+    fetcher.release()
+    handler.poll_ws_messages()
+
+    assert not handler._pending_adds
+    added = next(p for p in handler.current.pedalboard.plugins if p.instance_id == "ExtraChorus")
+    assert added.parameters[Symbol("rate")].value == pytest.approx(3.5)

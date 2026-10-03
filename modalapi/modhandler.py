@@ -61,7 +61,7 @@ from common.contexts import (
 from common.parameter import BYPASS_SYMBOL, Parameter, PortInfo, Symbol
 from common.param_source import ParamSink
 from common.parameter_editing import EditContext, ParameterSteps, effective_multiplier
-from modalapi.board_fetch import BoardFetcher, MetadataFetcher
+from modalapi.board_fetch import BoardFetcher, MetadataFetched, MetadataFetcher
 from modalapi.pending_add import PendingAdds
 from modalapi.plugin import Plugin
 from blend.input_controller import InputController
@@ -988,20 +988,32 @@ class Modhandler(Handler):
 
     def _drain_board_fetcher(self) -> None:
         for fetched in self.board_fetcher.drain():
-            self.plugin_dict.update(fetched.info)
-            if self._current is None:
-                self._pending_adds.clear()
-                continue
-            resolved = self._pending_adds.resolve(fetched.requested)
-            if not resolved:
-                continue
-            for pending in resolved:
+            try:
+                self._apply_fetched(fetched)
+            except Exception as e:
+                logging.error(f"Error applying fetched plugin metadata for {fetched.requested}: {e}")
+
+    def _apply_fetched(self, fetched: MetadataFetched) -> None:
+        self.plugin_dict.update(fetched.info)
+        if self._current is None:
+            self._pending_adds.clear()
+            return
+        resolved = self._pending_adds.resolve(fetched.requested)
+        if not resolved:
+            return
+        for pending in resolved:
+            try:
                 self._insert_plugin(pending.add, self.plugin_dict.get(pending.add.uri, {}))
+            except Exception as e:
+                logging.error(f"Error adding plugin {pending.add.instance}: {e}")
+        try:
             self.bind_current_pedalboard()
             self.lcd.draw_main_panel()
-            for pending in resolved:
-                for msg in pending.buffered:
-                    self._dispatch_ws_message(msg)
+        except Exception as e:
+            logging.error(f"Error refreshing the board after live add: {e}")
+        for pending in resolved:
+            for msg in pending.buffered:
+                self._dispatch_ws_message(msg)
 
     def _dispatch_ws_message(self, msg: WebSocketMessage) -> None:
         try:
