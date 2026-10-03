@@ -44,16 +44,21 @@ def _bare_instance(path: str) -> str:
 
 @dataclass
 class LoadingStartMessage:
-    """Pedalboard loading started."""
+    """A replay window opened (loading_start {empty} {modified}). The connect dump
+    sends mod-ui's live flags; a board load sends {isDefault} 0, and loading the
+    default board is how mod-ui empties one."""
 
-    is_default: bool
+    empty: bool
+    modified: bool
 
 
 @dataclass
 class LoadingEndMessage:
-    """Pedalboard loading finished."""
+    """A replay window closed (loading_end {snapshotId} {title}). The title is the
+    rest of the line, empty for an untitled board."""
 
     snapshot_id: int
+    title: str = ""
 
 
 @dataclass
@@ -152,6 +157,20 @@ class RemovePluginMessage:
 
 
 @dataclass
+class ResetMessage:
+    """mod-ui emptied the graph (remove :all, sent by Host.reset)."""
+
+
+@dataclass
+class PluginPosMessage:
+    """A plugin moved on the mod-ui canvas (plugin_pos {instance} {x} {y})."""
+
+    instance: str  # canonical bare form, e.g. "CollisionDrive"
+    x: float
+    y: float
+
+
+@dataclass
 class ConnectMessage:
     """Two ports connected in the active pedalboard (connect ...)."""
 
@@ -219,6 +238,8 @@ WebSocketMessage = Union[
     AddPluginMessage,
     PatchSetMessage,
     RemovePluginMessage,
+    ResetMessage,
+    PluginPosMessage,
     ConnectMessage,
     DisconnectMessage,
     ParamSetMessage,
@@ -231,14 +252,18 @@ def parse_message(raw_message: str) -> WebSocketMessage:
     """Parse raw WebSocket message string into typed message object."""
     try:
         match raw_message.split(" ", 2):
-            # Format: loading_start {isDefault}
-            case ["loading_start", flag, *_]:
-                return LoadingStartMessage(is_default=bool(int(flag)))
-            case ["loading_start", *_]:
-                return LoadingStartMessage(is_default=False)
+            # Format: loading_start {empty} {modified}
+            case ["loading_start", empty, modified]:
+                return LoadingStartMessage(empty=bool(int(empty)), modified=bool(int(modified.split()[0])))
+            case ["loading_start", empty]:
+                return LoadingStartMessage(empty=bool(int(empty)), modified=False)
+            case ["loading_start"]:
+                return LoadingStartMessage(empty=False, modified=False)
 
-            # Format: loading_end {snapshotId}
-            case ["loading_end", sid, *_]:
+            # Format: loading_end {snapshotId} {title}
+            case ["loading_end", sid, title]:
+                return LoadingEndMessage(snapshot_id=int(sid), title=title)
+            case ["loading_end", sid]:
                 return LoadingEndMessage(snapshot_id=int(sid))
             case ["loading_end"]:
                 return LoadingEndMessage(snapshot_id=0)
@@ -308,9 +333,18 @@ def parse_message(raw_message: str) -> WebSocketMessage:
                     value=parts[3],
                 )
 
+            # Format: remove :all  (Host.reset; must precede the instance arm)
+            case ["remove", ":all"]:
+                return ResetMessage()
+
             # Format: remove {instance}
             case ["remove", instance_path]:
                 return RemovePluginMessage(instance=_bare_instance(instance_path))
+
+            # Format: plugin_pos {instance} {x} {y}
+            case ["plugin_pos", instance_path, rest]:
+                x, y = rest.split()[:2]
+                return PluginPosMessage(instance=_bare_instance(instance_path), x=float(x), y=float(y))
 
             # Format: connect {port_from} {port_to}
             case ["connect", port_from, port_to]:

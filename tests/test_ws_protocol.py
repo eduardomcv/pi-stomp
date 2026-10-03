@@ -13,8 +13,10 @@ from modalapi.ws_protocol import (
     PedalSnapshotMessage,
     ParamSetMessage,
     PluginBypassMessage,
+    PluginPosMessage,
     RemoveHwPortMessage,
     RemovePluginMessage,
+    ResetMessage,
     SizeMessage,
     TransportMessage,
     TrueBypassMessage,
@@ -30,15 +32,29 @@ from common.parameter import Symbol
 
 
 def test_loading_start_true():
-    assert parse_message("loading_start 1") == LoadingStartMessage(is_default=True)
+    assert parse_message("loading_start 1") == LoadingStartMessage(empty=True, modified=False)
 
 
 def test_loading_start_false():
-    assert parse_message("loading_start 0") == LoadingStartMessage(is_default=False)
+    assert parse_message("loading_start 0") == LoadingStartMessage(empty=False, modified=False)
 
 
 def test_loading_start_no_flag():
-    assert parse_message("loading_start") == LoadingStartMessage(is_default=False)
+    assert parse_message("loading_start") == LoadingStartMessage(empty=False, modified=False)
+
+
+def test_loading_start_connect_dump_carries_modified():
+    # Host.report_current_state: loading_start {pedalboard_empty} {pedalboard_modified}
+    assert parse_message("loading_start 0 1") == LoadingStartMessage(empty=False, modified=True)
+
+
+def test_loading_start_board_load_of_default_board():
+    # Host.load: loading_start {isDefault} 0
+    assert parse_message("loading_start 1 0") == LoadingStartMessage(empty=True, modified=False)
+
+
+def test_loading_start_malformed_modified_is_unknown():
+    assert isinstance(parse_message("loading_start 0 x"), UnknownMessage)
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +72,19 @@ def test_loading_end_no_id():
 
 def test_loading_end_negative_id():
     assert parse_message("loading_end -1") == LoadingEndMessage(snapshot_id=-1)
+
+
+def test_loading_end_keeps_title_with_spaces():
+    assert parse_message("loading_end 2 My Rig v2") == LoadingEndMessage(snapshot_id=2, title="My Rig v2")
+
+
+def test_loading_end_untitled_board_has_empty_title():
+    # "loading_end %d %s" with an empty pedalboard_name leaves a trailing space.
+    assert parse_message("loading_end 0 ") == LoadingEndMessage(snapshot_id=0, title="")
+
+
+def test_loading_end_negative_id_with_title():
+    assert parse_message("loading_end -1 Rig") == LoadingEndMessage(snapshot_id=-1, title="Rig")
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +369,14 @@ def test_remove_plugin_no_graph_prefix():
     assert msg == RemovePluginMessage(instance="MyPlugin")
 
 
+def test_remove_all_is_reset():
+    assert parse_message("remove :all") == ResetMessage()
+
+
+def test_remove_instance_named_all_is_not_reset():
+    assert parse_message("remove /graph/all") == RemovePluginMessage(instance="all")
+
+
 # ---------------------------------------------------------------------------
 # connect / disconnect
 # ---------------------------------------------------------------------------
@@ -358,6 +395,23 @@ def test_connect_from_capture():
 def test_disconnect():
     msg = parse_message("disconnect /graph/PluginA/out_L /graph/PluginB/in_L")
     assert msg == DisconnectMessage(port_from="/graph/PluginA/out_L", port_to="/graph/PluginB/in_L")
+
+
+# ---------------------------------------------------------------------------
+# plugin_pos (session.py ws_plugin_position: plugin_pos {instance} {x:%d} {y:%d})
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_pos():
+    assert parse_message("plugin_pos /graph/drive 900 40") == PluginPosMessage(instance="drive", x=900.0, y=40.0)
+
+
+def test_plugin_pos_accepts_float_coordinates():
+    assert parse_message("plugin_pos /graph/drive 12.5 -7.25") == PluginPosMessage(instance="drive", x=12.5, y=-7.25)
+
+
+def test_plugin_pos_missing_y_is_unknown():
+    assert isinstance(parse_message("plugin_pos /graph/drive 900"), UnknownMessage)
 
 
 # ---------------------------------------------------------------------------
