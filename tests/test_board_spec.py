@@ -11,7 +11,7 @@ import pytest
 from common.parameter import BYPASS_SYMBOL, Symbol
 from modalapi.board_spec import BoardBuilder, BoardSpec, MidiMapSpec, PluginSpec
 from modalapi.ws_protocol import CONNECTED_MARKER, UnknownMessage, parse_message
-from tests.replay_helpers import feed, load_replay, spec_of
+from tests.replay_helpers import REPLAY_DIR, feed, load_replay, spec_of
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DRIVE = "http://example.com/fixture/drive"
@@ -312,3 +312,11 @@ def test_unsaved_connect_dump_of_an_untitled_board():
 def test_reset_then_load_replaces_the_scratch_board():
     spec = _replayed("connect_dump_unsaved.txt", "reset_then_load.txt")
     assert spec == dataclasses.replace(_replayed("board_load.txt"), snapshot_id=1)
+
+
+@pytest.mark.parametrize("name", [p.name for p in sorted(REPLAY_DIR.glob("device_*.txt"))])
+def test_device_capture_builds_every_plugin_of_its_last_window(name: str):
+    lines = load_replay(name)
+    last_start = max(i for i, line in enumerate(lines) if line.startswith("loading_start"))
+    added = [line.split(" ", 2)[1].removeprefix("/graph/") for line in lines[last_start:] if line.startswith("add ")]
+    assert list(_replayed(name).plugins) == added
