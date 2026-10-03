@@ -18,7 +18,6 @@
 import json
 import logging
 import pistomp.httpclient as req
-import sys
 import urllib.parse
 from typing import Optional
 
@@ -111,14 +110,13 @@ class Pedalboard:
         url = self.root_uri + "effect/get?uri=" + urllib.parse.quote(uri)
         try:
             resp = req.get(url, headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
-        except Exception:  # TODO
-            logging.error("Cannot connect to mod-host.")
-            sys.exit()
+        except Exception as e:
+            logging.error("Cannot connect to mod-ui: %s", e)
+            return {}
 
         if resp.status_code != 200:
-            logging.error("mod-host not able to get plugin data: %s\nStatus: %s" % (url, resp.status_code))
+            logging.error("mod-ui not able to get plugin data: %s\nStatus: %s" % (url, resp.status_code))
             return {}
-            # sys.exit()
 
         return json.loads(resp.text)
 
@@ -128,9 +126,9 @@ class Pedalboard:
         url = self.root_uri + "pedalboard/info/?bundlepath=" + urllib.parse.quote(self.bundle)
         try:
             resp = req.get(url)
-        except Exception:
-            logging.error("Cannot connect to mod-ui.")
-            sys.exit()
+        except Exception as e:
+            logging.error("Cannot connect to mod-ui: %s", e)
+            return {}
 
         if resp.status_code != 200:
             logging.error("mod-ui not able to get pedalboard info: %s  Status: %s" % (url, resp.status_code))
@@ -302,16 +300,13 @@ class Pedalboard:
             return self.transport_plugin
         return None
 
-    def _build_plugin(self, instance_id: str, uri: str, x: float, y: float, info: dict) -> Optional[Plugin.Plugin]:
+    def _build_plugin(self, instance_id: str, uri: str, x: float, y: float, info: dict) -> Plugin.Plugin:
         """Build a Plugin from REST metadata (no LILV). Used for dynamic adds.
 
         Parameters start at REST defaults; bypass is set false. MIDI bindings
         arrive later via midi_map WS messages; values arrive via param_set.
-        Returns None if info is empty (unknown plugin URI).
+        Empty info (metadata unfetchable) yields a bypass-only plugin, as hydrate and from_spec do for a missing LV2.
         """
-        if not info:
-            return None
-
         category = None
         cat = info.get("category")
         if cat and len(cat) > 0:
@@ -333,7 +328,7 @@ class Pedalboard:
         # doesn't include the numeric `pedal:instanceNumber`, so we can't address
         # effect-N/effect.ttl. A protocol change (include the instance number
         # on the wire) would let us pass the bundle + number to the customizer.
-        inst = Plugin.Plugin(instance_id, parameters, info, category, uri=uri, customization=self._customizer(uri))
+        inst = Plugin.Plugin(instance_id, parameters, info or None, category, uri=uri, customization=self._customizer(uri))
         inst.canvas_x = x
         inst.canvas_y = y
         return inst

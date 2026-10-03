@@ -963,9 +963,6 @@ class Modhandler(Handler):
         assert self._current is not None
         info = self.current.pedalboard.get_plugin_data(msg.uri)
         plugin = self.current.pedalboard._build_plugin(msg.instance, msg.uri, msg.x, msg.y, info)
-        if plugin is None:
-            logging.warning(f"Dynamic plugin add: no metadata for URI {msg.uri}, skipping")
-            return
         plugin.set_bypass(msg.bypassed)
         # Insert maintaining canvas-X sort order
         keys = [p.canvas_x for p in self.current.pedalboard.plugins]

@@ -438,10 +438,10 @@ def test_v3_add_dump_reseeds_bypass_on_reconnect(v3_system: SystemFixture, make_
     assert plugin.is_bypassed()
 
 
-def test_v3_add_dynamic_unknown_plugin_empty_info_silently_fails(v3_system: SystemFixture, make_plugin):
+def test_v3_add_dynamic_unknown_plugin_empty_info_adds_bypass_only(v3_system: SystemFixture, make_plugin):
     """An add for an unknown instance triggers a dynamic-add attempt.
-    When REST returns no metadata (unknown URI), it fails silently — no plugin added,
-    no existing plugin state corrupted."""
+    When REST returns no metadata (unknown URI), a bypass-only plugin is added
+    and no existing plugin state is corrupted."""
     handler = v3_system.handler
     ws_bridge = v3_system.ws_bridge
 
@@ -455,7 +455,9 @@ def test_v3_add_dynamic_unknown_plugin_empty_info_silently_fails(v3_system: Syst
     handler.poll_ws_messages()
 
     assert not plugin.is_bypassed()
-    assert len(handler.current.pedalboard.plugins) == before
+    assert len(handler.current.pedalboard.plugins) == before + 1
+    added = next(p for p in handler.current.pedalboard.plugins if p.instance_id == "other_board_plugin")
+    assert list(added.parameters.keys()) == [":bypass"]
 
 
 def test_v3_handle_bypass_event_updates_plugin(v3_system: SystemFixture, make_plugin, snapshot):
