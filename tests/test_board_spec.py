@@ -1,19 +1,23 @@
 """BoardBuilder folds mod-ui's board-scoped stream into a frozen BoardSpec."""
 
+import dataclasses
 import subprocess
 import sys
 from pathlib import Path
 from types import MappingProxyType
 
+import pytest
+
 from common.parameter import BYPASS_SYMBOL, Symbol
-from modalapi.board_spec import BoardBuilder, MidiMapSpec, PluginSpec
-from modalapi.ws_protocol import CONNECTED_MARKER
-from tests.replay_helpers import feed, spec_of
+from modalapi.board_spec import BoardBuilder, BoardSpec, MidiMapSpec, PluginSpec
+from modalapi.ws_protocol import CONNECTED_MARKER, UnknownMessage, parse_message
+from tests.replay_helpers import feed, load_replay, spec_of
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DRIVE = "http://example.com/fixture/drive"
 MODEL = "http://github.com/mikeoliphant/neural-amp-modeler-lv2#model"
 BPM = Symbol(":bpm")
+NAM_PATH = "/home/pistomp/data/user-files/NAM Models/Clean (G1 L0 B1 T1).nam"
 
 
 def _add(instance: str, x: float = 0.0, y: float = 0.0, *, bypassed: int = 0, number: int | None = None) -> str:
@@ -257,3 +261,54 @@ def test_pedalboard_reexports_the_transport_instance_id():
     import modalapi.pedalboard as pedalboard
 
     assert pedalboard.TRANSPORT_INSTANCE_ID == board_spec.TRANSPORT_INSTANCE_ID == "pedalboard"
+
+
+FIXTURES = ["connect_dump_saved.txt", "connect_dump_unsaved.txt", "board_load.txt", "reset_then_load.txt"]
+
+
+def _replayed(*names: str) -> BoardSpec:
+    builder = BoardBuilder()
+    for name in names:
+        feed(builder, load_replay(name))
+    return builder.freeze()
+
+
+@pytest.mark.parametrize("name", FIXTURES)
+def test_every_fixture_line_parses(name: str):
+    unknown = [line for line in load_replay(name) if isinstance(parse_message(line), UnknownMessage)]
+    assert all(line.startswith(("sys_stats ", "stats ")) for line in unknown), unknown
+
+
+def test_saved_connect_dump():
+    spec = _replayed("connect_dump_saved.txt")
+    assert list(spec.plugins) == ["drive", "neural_amp_modeler_lv2_1", "verb"]
+    assert (spec.empty, spec.modified, spec.snapshot_id, spec.title) == (False, False, 0, "Fixture Rig")
+    drive = spec.plugins["drive"]
+    assert dict(drive.values) == {Symbol("gain"): 0.75, Symbol("tone"): 0.5, Symbol("level"): 0.0}
+    assert set(drive.midi) == {BYPASS_SYMBOL, Symbol("gain")}
+    assert spec.plugins["verb"].bypassed is True
+    assert spec.plugins["neural_amp_modeler_lv2_1"].patches[MODEL] == NAM_PATH
+    assert dict(spec.transport_midi) == {BPM: MidiMapSpec(channel=0, controller=70, minimum=20.0, maximum=280.0)}
+    assert len(spec.connections) == 5
+
+
+def test_board_load_streams_only_non_default_values():
+    loaded = _replayed("board_load.txt")
+    saved = _replayed("connect_dump_saved.txt")
+    assert dict(loaded.plugins["drive"].values) == {Symbol("gain"): 0.75}
+    assert dict(loaded.plugins["verb"].values) == {}
+    assert loaded.connections == saved.connections
+    assert {i: p.midi for i, p in loaded.plugins.items()} == {i: p.midi for i, p in saved.plugins.items()}
+
+
+def test_unsaved_connect_dump_of_an_untitled_board():
+    spec = _replayed("connect_dump_unsaved.txt")
+    assert (spec.empty, spec.modified, spec.snapshot_id, spec.title) == (True, True, 0, "")
+    assert [p.instance_number for p in spec.plugins.values()] == [0, 1, 2]
+    assert spec.plugins["drive_2"].bypassed is True
+    assert dict(spec.plugins["mystery"].values) == {Symbol("amount"): 0.25}
+
+
+def test_reset_then_load_replaces_the_scratch_board():
+    spec = _replayed("connect_dump_unsaved.txt", "reset_then_load.txt")
+    assert spec == dataclasses.replace(_replayed("board_load.txt"), snapshot_id=1)

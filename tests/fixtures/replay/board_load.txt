@@ -1,0 +1,18 @@
+loading_start 0 0
+size 1240 620
+transport 0 4.000000 120.000000 none
+add /graph/drive http://example.com/fixture/drive 200.0 150.0 0 0_0_1_0 0
+param_set /graph/drive gain 0.750000
+add /graph/neural_amp_modeler_lv2_1 http://github.com/mikeoliphant/neural-amp-modeler-lv2 600.0 150.0 0 0_0_1_0 0
+param_set /graph/neural_amp_modeler_lv2_1 output_level -6.000000
+add /graph/verb http://example.com/fixture/verb 1000.0 150.0 1 0_0_1_0 0
+connect /graph/capture_1 /graph/drive/in
+connect /graph/drive/out /graph/neural_amp_modeler_lv2_1/input
+connect /graph/neural_amp_modeler_lv2_1/output /graph/verb/in
+connect /graph/verb/out_l /graph/playback_1
+connect /graph/verb/out_r /graph/playback_2
+patch_set /graph/neural_amp_modeler_lv2_1 1 http://github.com/mikeoliphant/neural-amp-modeler-lv2#model p /home/pistomp/data/user-files/NAM Models/Clean (G1 L0 B1 T1).nam
+midi_map /graph/drive :bypass 0 60 0.000000 1.000000
+midi_map /graph/drive gain 0 61 0.000000 1.000000
+midi_map /pedalboard :bpm 0 70 20.000000 280.000000
+loading_end 0 Fixture Rig

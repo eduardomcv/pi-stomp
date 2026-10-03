@@ -1,0 +1,25 @@
+sys_stats 391152 1500000 48312
+stats 9.8 0
+transport 1 4.000000 96.000000 none
+truebypass 0 0
+loading_start 1 1
+size 0 0
+add_hw_port /graph/capture_1 audio 0 Capture_1 1
+add_hw_port /graph/capture_2 audio 0 Capture_2 2
+add_hw_port /graph/playback_1 audio 1 Playback_1 1
+add_hw_port /graph/playback_2 audio 1 Playback_2 2
+add /graph/drive http://example.com/fixture/drive 200.0 150.0 0 0_0_1_0 0 0
+add /graph/drive_2 http://example.com/fixture/drive 200.0 500.0 1 0_0_1_0 0 1
+add /graph/mystery http://example.com/fixture/not-installed 600.0 150.0 0 0_0_1_0 0 2
+param_set /graph/drive gain 0.500000
+param_set /graph/drive tone 0.500000
+param_set /graph/drive level 0.000000
+param_set /graph/drive_2 gain 0.900000
+param_set /graph/drive_2 tone 0.200000
+param_set /graph/drive_2 level -3.000000
+param_set /graph/mystery amount 0.250000
+connect /graph/capture_1 /graph/drive/in
+connect /graph/capture_2 /graph/drive_2/in
+connect /graph/drive/out /graph/playback_1
+connect /graph/drive_2/out /graph/playback_2
+loading_end 0 

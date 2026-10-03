@@ -1,0 +1,42 @@
+{
+  "http://example.com/fixture/drive": {
+    "name": "Fixture Drive",
+    "category": ["Distortion"],
+    "ports": {
+      "audio": {"input": [{"symbol": "in"}], "output": [{"symbol": "out"}]},
+      "control": {
+        "input": [
+          {"symbol": "gain", "shortName": "Gain", "ranges": {"minimum": 0.0, "maximum": 1.0, "default": 0.5}},
+          {"symbol": "tone", "shortName": "Tone", "ranges": {"minimum": 0.0, "maximum": 1.0, "default": 0.5}},
+          {"symbol": "level", "shortName": "Level", "ranges": {"minimum": -20.0, "maximum": 6.0, "default": 0.0}}
+        ]
+      }
+    }
+  },
+  "http://github.com/mikeoliphant/neural-amp-modeler-lv2": {
+    "name": "Neural Amp Modeler",
+    "category": ["Simulator"],
+    "ports": {
+      "audio": {"input": [{"symbol": "input"}], "output": [{"symbol": "output"}]},
+      "control": {
+        "input": [
+          {"symbol": "input_level", "shortName": "Input", "ranges": {"minimum": -20.0, "maximum": 20.0, "default": 0.0}},
+          {"symbol": "output_level", "shortName": "Output", "ranges": {"minimum": -20.0, "maximum": 20.0, "default": 0.0}}
+        ]
+      }
+    }
+  },
+  "http://example.com/fixture/verb": {
+    "name": "Fixture Verb",
+    "category": ["Reverb"],
+    "ports": {
+      "audio": {"input": [{"symbol": "in"}], "output": [{"symbol": "out_l"}, {"symbol": "out_r"}]},
+      "control": {
+        "input": [
+          {"symbol": "decay", "shortName": "Decay", "ranges": {"minimum": 0.1, "maximum": 10.0, "default": 2.0}},
+          {"symbol": "mix", "shortName": "Mix", "ranges": {"minimum": 0.0, "maximum": 1.0, "default": 0.4}}
+        ]
+      }
+    }
+  }
+}
