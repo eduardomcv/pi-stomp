@@ -110,9 +110,10 @@ def test_build_plugin_creates_plugin():
     assert plugin.name == "Extra Chorus"
 
 
-def test_build_plugin_returns_none_for_empty_info():
+def test_build_plugin_empty_info_is_bypass_only():
     pb = Pedalboard("Test", "/test/bundle")
-    assert pb._build_plugin("ExtraChorus", _EXTRA_CHORUS_URI, 0.0, 0.0, {}) is None
+    plugin = pb._build_plugin("ExtraChorus", _EXTRA_CHORUS_URI, 0.0, 0.0, {})
+    assert list(plugin.parameters.keys()) == [":bypass"]
 
 
 def test_build_plugin_bypass_param_always_present():
@@ -286,8 +287,8 @@ def test_v3_dynamic_add_suppressed_during_connect_dump(parallel_beths_system: Sy
         handler._is_pedalboard_loading = False
 
 
-def test_v3_dynamic_add_no_metadata_silently_skips(parallel_beths_system: SystemFixture):
-    """REST returns {} for unknown URI → no plugin added, existing board untouched."""
+def test_v3_dynamic_add_no_metadata_adds_bypass_only_tile(parallel_beths_system: SystemFixture):
+    """REST returns {} for the URI → the plugin still appears, with only a bypass control."""
     handler = parallel_beths_system.handler
     ws_bridge = parallel_beths_system.ws_bridge
     before = len(handler.current.pedalboard.plugins)
@@ -295,7 +296,9 @@ def test_v3_dynamic_add_no_metadata_silently_skips(parallel_beths_system: System
     ws_bridge.inject("add /graph/Unknown http://not.registered/plugin 0.0 0.0 0 1 1")
     handler.poll_ws_messages()
 
-    assert len(handler.current.pedalboard.plugins) == before
+    assert len(handler.current.pedalboard.plugins) == before + 1
+    added = next(p for p in handler.current.pedalboard.plugins if p.instance_id == "Unknown")
+    assert list(added.parameters.keys()) == [":bypass"]
 
 
 def test_v3_dynamic_add_control_port_defaults_populated(parallel_beths_system: SystemFixture):

@@ -61,6 +61,8 @@ from common.contexts import (
 from common.parameter import BYPASS_SYMBOL, Parameter, PortInfo, Symbol
 from common.param_source import ParamSink
 from common.parameter_editing import EditContext, ParameterSteps, effective_multiplier
+from modalapi.board_fetch import BoardFetcher, MetadataFetched, MetadataFetcher
+from modalapi.pending_add import PendingAdds
 from modalapi.plugin import Plugin
 from blend.input_controller import InputController
 import modalapi.pedalboard as Pedalboard
@@ -163,6 +165,8 @@ class Modhandler(Handler):
         self.pedalboards = {}
         self.pedalboard_list = []  # TODO LAME to have two lists
         self.plugin_dict = {}
+        self.board_fetcher: MetadataFetcher = BoardFetcher(self.root_uri)
+        self._pending_adds = PendingAdds()
 
         # Unbound encoders own no value; the handler (the emitter) keeps their
         # MIDI-learn fallback CC, keyed by "channel:CC" so it persists across
@@ -266,6 +270,7 @@ class Modhandler(Handler):
         self.external_midi.close()
         self.ws_bridge.stop()
         logging.info("WebSocket bridge stopped")
+        self.board_fetcher.cleanup()
         self.ethernet_manager.shutdown()
 
     def _rest_get(self, url: str) -> Response | None:
@@ -774,10 +779,13 @@ class Modhandler(Handler):
 
     def _handle_ws_message(self, msg: WebSocketMessage):
         """Handle incoming WebSocket message from MOD-UI."""
+        if self._pending_adds and self._pending_adds.defer(msg):
+            return
         if isinstance(msg, LoadingStartMessage):
             self._is_pedalboard_loading = True
             self._pending_dump_bypass.clear()
             self._pending_dump_patch.clear()
+            self._pending_adds.clear()
             cleared = self.ws_bridge.clear_queue()
             if cleared:
                 logging.debug(f"Cleared {cleared} stale outbound messages on loading_start")
@@ -959,21 +967,59 @@ class Modhandler(Handler):
             self.lcd.draw_main_panel()
 
     def _handle_dynamic_plugin_add(self, msg: AddPluginMessage) -> None:
-        """Handle an `add` WS message for a plugin not yet in the pedalboard model."""
+        """An `add` for a plugin not yet in the model. A URI already fetched builds the
+        plugin now; otherwise the add waits for the worker, and its later messages with it."""
         assert self._current is not None
-        info = self.current.pedalboard.get_plugin_data(msg.uri)
-        plugin = self.current.pedalboard._build_plugin(msg.instance, msg.uri, msg.x, msg.y, info)
-        if plugin is None:
-            logging.warning(f"Dynamic plugin add: no metadata for URI {msg.uri}, skipping")
-            return
+        info = self.plugin_dict.get(msg.uri)
+        if info is not None:
+            self._insert_plugin(msg, info)
+            self.bind_current_pedalboard()
+            self.lcd.draw_main_panel()
+        elif self._pending_adds.start(msg):
+            self.board_fetcher.request_metadata([msg.uri])
+
+    def _insert_plugin(self, msg: AddPluginMessage, info: dict) -> None:
+        board = self.current.pedalboard
+        plugin = board._build_plugin(msg.instance, msg.uri, msg.x, msg.y, info)
         plugin.set_bypass(msg.bypassed)
-        # Insert maintaining canvas-X sort order
-        keys = [p.canvas_x for p in self.current.pedalboard.plugins]
-        idx = bisect.bisect_left(keys, plugin.canvas_x)
-        self.current.pedalboard.plugins.insert(idx, plugin)
+        keys = [p.canvas_x for p in board.plugins]
+        board.plugins.insert(bisect.bisect_left(keys, plugin.canvas_x), plugin)
         logging.info(f"WebSocket: Plugin {msg.instance} ({msg.uri}) dynamically added")
-        self.bind_current_pedalboard()
-        self.lcd.draw_main_panel()
+
+    def _drain_board_fetcher(self) -> None:
+        for fetched in self.board_fetcher.drain():
+            try:
+                self._apply_fetched(fetched)
+            except Exception as e:
+                logging.error(f"Error applying fetched plugin metadata for {fetched.requested}: {e}")
+
+    def _apply_fetched(self, fetched: MetadataFetched) -> None:
+        self.plugin_dict.update(fetched.info)
+        if self._current is None:
+            self._pending_adds.clear()
+            return
+        resolved = self._pending_adds.resolve(fetched.requested)
+        if not resolved:
+            return
+        for pending in resolved:
+            try:
+                self._insert_plugin(pending.add, self.plugin_dict.get(pending.add.uri, {}))
+            except Exception as e:
+                logging.error(f"Error adding plugin {pending.add.instance}: {e}")
+        try:
+            self.bind_current_pedalboard()
+            self.lcd.draw_main_panel()
+        except Exception as e:
+            logging.error(f"Error refreshing the board after live add: {e}")
+        for pending in resolved:
+            for msg in pending.buffered:
+                self._dispatch_ws_message(msg)
+
+    def _dispatch_ws_message(self, msg: WebSocketMessage) -> None:
+        try:
+            self._handle_ws_message(msg)
+        except Exception as e:
+            logging.error(f"Error handling WebSocket message '{msg}': {e}")
 
     def poll_ws_messages(self):
         """Drain inbound WS messages (fast ~10ms cadence). Main-thread only.
@@ -988,10 +1034,8 @@ class Modhandler(Handler):
             except Exception as e:
                 logging.error(f"Error parsing WebSocket message '{msg}': {e}")
         for msg in coalesce_param_sets(parsed):
-            try:
-                self._handle_ws_message(msg)
-            except Exception as e:
-                logging.error(f"Error handling WebSocket message '{msg}': {e}")
+            self._dispatch_ws_message(msg)
+        self._drain_board_fetcher()
 
     def poll_modui_changes(self):
         """Poll for changes from MOD-UI: websockets and file watching"""
@@ -1131,6 +1175,7 @@ class Modhandler(Handler):
         return read_pedalboard_bundle(self.last_json_monitor.path)
 
     def set_current_pedalboard(self, pedalboard):
+        self._pending_adds.clear()
         pedalboard.hydrate(self.plugin_dict)
 
         # Pop non-persisting panels above the first persister (e.g. a parameter
