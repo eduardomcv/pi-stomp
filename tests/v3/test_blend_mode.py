@@ -412,7 +412,7 @@ def test_switching_between_blend_modes_applies_correct_initial_values(
     pb.bundle = str(bundle_dir)
     pb.plugins = [big_muff]
 
-    handler.set_current_pedalboard(pb)
+    handler.install_board(pb, {0: "Clean", 1: "Lead", 2: "Crunch", 3: "Blend A", 4: "Blend B"}, 0, sync_blend=True)
 
     # Auto-activation should have landed on Blend A (first blend mode)
     assert handler.active_blend_mode is not None

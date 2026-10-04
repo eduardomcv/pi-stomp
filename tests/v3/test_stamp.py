@@ -1,15 +1,21 @@
 """Integration tests for the pistomp-stamp stamping protocol — v3 (Modhandler).
 
-v3 stamps inside ``poll_modui_changes()`` when MOD-UI writes a new
-``last.json`` and the pedalboard actually changes.
+v3 stamps when a board window swaps in a different bundle, or when a ``last.json``
+refresh (Save-As) rebases the current board onto one.
 """
 
 import json
 import os
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
+from modalapi.pedalboard import Pedalboard
+from modalapi.ws_protocol import CONNECTED_MARKER
+from tests.board_window import play_window, serve_board
+from tests.replay_helpers import board_to_replay_lines
 from tests.types import SystemFixture
+
+NEW = "/path/to/new.pedalboard"
 
 
 def _stamp_calls(mock_run):
@@ -29,39 +35,51 @@ def _assert_stamp_not_called(mock_run):
     assert not calls, f"Unexpected pistomp-stamp call(s): {calls}"
 
 
+def _touch_last_json(handler, bundle: str) -> None:
+    last_json = Path(handler.data_dir) / "last.json"
+    last_json.write_text(json.dumps({"pedalboard": bundle}))
+    os.utime(last_json, (9999, 9999))
+
+
 class TestStampOnPedalboardChange:
-    """pistomp-stamp stamp must be called when poll_modui_changes() detects
-    a pedalboard change via last.json."""
+    """pistomp-stamp stamp must be called when mod-ui's stream or a last.json
+    refresh moves pi-stomp onto a different bundle."""
 
-    def test_stamp_called_on_modui_change(self, v3_system: SystemFixture, make_plugin):
+    def test_stamp_called_on_modui_change(self, v3_system: SystemFixture):
         handler = v3_system.handler
-        mock_get = v3_system.mock_get
+        serve_board(v3_system, bundle=NEW)
+        _touch_last_json(handler, NEW)
 
-        pb2 = handler.pedalboards["/path/to/new.pedalboard"]
-        pb2.plugins = [make_plugin("fuzz", category="Distortion")]
+        with patch("modalapi.modhandler.subprocess.Popen") as mock_run:
+            play_window(v3_system, board_to_replay_lines(Pedalboard("New Rig", NEW), False, False, 0))
+            handler.poll_modui_changes()
+            handler.poll_modui_changes()
 
-        def get_side_effect(url, **kwargs):
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.text = (
-                json.dumps({"0": "Default"})
-                if "snapshot/list" in url
-                else json.dumps({"name": "Default"})
-                if "snapshot/name" in url
-                else "{}"
-            )
-            return resp
+        assert handler.current.pedalboard.bundle == NEW
+        _assert_stamp_called(mock_run, times=1)
 
-        mock_get.side_effect = get_side_effect
-
-        last_json = Path(handler.data_dir) / "last.json"
-        last_json.write_text(json.dumps({"pedalboard": "/path/to/new.pedalboard"}))
-        os.utime(last_json, (9999, 9999))
+    def test_stamp_called_on_save_as_rebase(self, v3_system: SystemFixture):
+        handler = v3_system.handler
+        serve_board(v3_system, bundle=NEW)
+        _touch_last_json(handler, NEW)
 
         with patch("modalapi.modhandler.subprocess.Popen") as mock_run:
             handler.poll_modui_changes()
+            handler.poll_modui_changes()
 
+        assert handler.current.pedalboard.bundle == NEW
         _assert_stamp_called(mock_run, times=1)
+
+    def test_no_stamp_on_reconnect_with_unsaved_edits(self, v3_system: SystemFixture):
+        """A replayed board mod-ui holds modified is not a known-good bundle."""
+        serve_board(v3_system, bundle=NEW)
+        lines = [CONNECTED_MARKER, *board_to_replay_lines(Pedalboard("New Rig", NEW), False, True, 0)]
+
+        with patch("modalapi.modhandler.subprocess.Popen") as mock_run:
+            play_window(v3_system, lines)
+
+        assert v3_system.handler.current.pedalboard.bundle == NEW
+        _assert_stamp_not_called(mock_run)
 
     def test_no_stamp_without_change(self, v3_system: SystemFixture):
         """poll_modui_changes() must NOT stamp when last.json hasn't changed."""
@@ -73,15 +91,15 @@ class TestStampOnPedalboardChange:
         _assert_stamp_not_called(mock_run)
 
     def test_no_stamp_on_same_pedalboard(self, v3_system: SystemFixture):
-        """poll_modui_changes() must NOT stamp when last.json points to the
-        same pedalboard already loaded."""
+        """Neither a window nor a last.json refresh naming the bundle already
+        loaded may stamp."""
         handler = v3_system.handler
-
-        last_json = Path(handler.data_dir) / "last.json"
-        last_json.write_text(json.dumps({"pedalboard": "/path/to/rig.pedalboard"}))
-        os.utime(last_json, (9999, 9999))
+        rig = handler.current.pedalboard
+        _touch_last_json(handler, "/path/to/rig.pedalboard")
 
         with patch("modalapi.modhandler.subprocess.Popen") as mock_run:
+            play_window(v3_system, board_to_replay_lines(rig, False, False, 0))
+            handler.poll_modui_changes()
             handler.poll_modui_changes()
 
         _assert_stamp_not_called(mock_run)

@@ -1,8 +1,8 @@
-"""The board-stream vocabulary PR-A parses is not acted on yet: the connect marker,
-`plugin_pos` and `remove :all` leave the board, the screen and the outbound queue as
-they were. `remove :all` was already inert: it parsed as an instance named ":all"
-that no board holds."""
+"""Outside a window, a lone connect marker only arms the next window and `plugin_pos` is
+not acted on yet: the board, the screen and the outbound queue stay as they were.
+`remove :all` outside a window is the one stream message that changes the board."""
 
+from modalapi.board_sync import UNTITLED, SyncState
 from modalapi.connections import Connection, Endpoint, EndpointKind
 from modalapi.ws_protocol import CONNECTED_MARKER
 from tests.types import SystemFixture
@@ -27,10 +27,11 @@ def test_v3_board_stream_messages_are_inert(v3_system: SystemFixture, make_plugi
     handler.lcd.draw_main_panel()
     snapshot("board")
 
-    for raw in (CONNECTED_MARKER, "plugin_pos /graph/drive 900 40", "remove :all"):
+    for raw in (CONNECTED_MARKER, "plugin_pos /graph/drive 900 40"):
         ws_bridge.inject(raw)
     handler.poll_ws_messages()
 
+    assert handler._board_sync.state is SyncState.IDLE
     assert handler.current.pedalboard.plugins == [drive, delay]
     assert handler.current.pedalboard.connections == [_edge("drive", "delay")]
     assert (drive.canvas_x, drive.canvas_y) == (0.0, 0.0)
@@ -38,3 +39,21 @@ def test_v3_board_stream_messages_are_inert(v3_system: SystemFixture, make_plugi
     assert ws_bridge.sent == []
     handler.lcd.draw_main_panel()
     snapshot("board")
+
+
+def test_v3_remove_all_outside_a_window_empties_the_board_in_place(v3_system: SystemFixture, make_plugin, monkeypatch):
+    handler = v3_system.handler
+    board = handler.current.pedalboard
+    board.plugins = [make_plugin("drive", category="Distortion")]
+    board.connections = [_edge("drive", "delay")]
+    reinits = []
+    monkeypatch.setattr(handler.hardware, "reinit", reinits.append)
+
+    v3_system.ws_bridge.inject("remove :all")
+    handler.poll_ws_messages()
+
+    assert handler.current.pedalboard is board
+    assert (board.plugins, board.connections) == ([], [])
+    assert (board.title, board.bundle) == (UNTITLED, None)
+    assert reinits == []
+    assert v3_system.ws_bridge.sent == []

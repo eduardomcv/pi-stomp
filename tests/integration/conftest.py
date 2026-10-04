@@ -68,7 +68,9 @@ def _build_stack(
         def get_side_effect(url, **kwargs):
             resp = MagicMock()
             resp.status_code = 200
-            if "pedalboard/list" in url:
+            if "pedalboard/current" in url:
+                resp.text = "/path/to/rig.pedalboard"
+            elif "pedalboard/list" in url:
                 resp.text = json.dumps(
                     [
                         {Token.TITLE: "Integration Rig", Token.BUNDLE: "/path/to/rig.pedalboard"},
@@ -113,6 +115,9 @@ def _build_stack(
         pb = handler.pedalboards["/path/to/rig.pedalboard"]
         pb.plugins = []
         handler.set_current_pedalboard(pb)
+        handler.current.presets = {0: "Clean", 1: "Lead"}
+        handler.current.preset_index = 0
+        handler.lcd.draw_title()
         handler.pedalboards["/path/to/new.pedalboard"].plugins = []
 
         mock_get.reset_mock()

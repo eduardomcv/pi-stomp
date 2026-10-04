@@ -238,7 +238,7 @@ def _build_blend_system(
     pb.bundle = str(bundle_dir)
     pb.plugins = [big_muff]
 
-    handler.set_current_pedalboard(pb)
+    handler.install_board(pb, {0: "Clean", 1: "Lead", 2: "Blend"}, 0, sync_blend=True)
 
     cast(FakeWebSocketBridge, handler.ws_bridge).sent.clear()
     if handler.active_blend_mode and handler.active_blend_mode.parameter_setter:

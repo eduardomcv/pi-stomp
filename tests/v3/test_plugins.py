@@ -17,8 +17,10 @@ from modalapi.plugin import Plugin
 from pistomp.controller import ControlType
 from pistomp.config.adapt_v1 import adapt
 from pistomp.config.schema_v1 import merge
+from tests.board_window import play_window, serve_board
 from tests.types import SystemFixture
 from modalapi.connections import Connection, Endpoint, EndpointKind
+from modalapi.ws_protocol import CONNECTED_MARKER
 from plugins.customization import lookup
 from plugins.nam import NAM_URIS
 from uilib.text import TextWidget
@@ -585,8 +587,9 @@ def test_v3_reconnect_dump_reseeds_bypass_via_poll(v3_system: SystemFixture, mak
     ws_bridge = v3_system.ws_bridge
 
     assert handler.current
-    drive = make_plugin("drive", category="Distortion", bypassed=False)
-    delay = make_plugin("delay", category="Delay", bypassed=False)
+    drive = make_plugin("drive", category="Distortion", bypassed=False, uri="http://uri")
+    delay = make_plugin("delay", category="Delay", bypassed=False, uri="http://uri")
+    delay.canvas_x = 100.0
     handler.current.pedalboard.plugins = [drive, delay]
     handler.current.pedalboard.connections = [
         Connection(
@@ -599,63 +602,47 @@ def test_v3_reconnect_dump_reseeds_bypass_via_poll(v3_system: SystemFixture, mak
     snapshot("both_active")
 
     # Reconnect dump for the same board: delay reconnects bypassed (field 4 = 1)
-    ws_bridge.inject("loading_start 0")
-    ws_bridge.inject("add drive http://uri 0.0 0.0 0 1 1")
-    ws_bridge.inject("add delay http://uri 0.0 0.0 1 1 1")
-    ws_bridge.inject("loading_end 0")
+    ws_bridge.inject(CONNECTED_MARKER)
+    ws_bridge.inject("loading_start 0 0")
+    ws_bridge.inject("add /graph/drive http://uri 0.0 0.0 0 1 1")
+    ws_bridge.inject("add /graph/delay http://uri 100.0 0.0 1 1 1")
+    ws_bridge.inject("connect /graph/drive /graph/delay")
+    ws_bridge.inject("loading_end 0 Integration Rig")
     handler.poll_modui_changes()
 
+    assert handler.current.pedalboard.plugins == [drive, delay]
     assert not drive.is_bypassed()
     assert delay.is_bypassed()
     snapshot("delay_bypassed")
 
 
-def test_v3_reconnect_after_board_change_same_tick_applies_dump(v3_system: SystemFixture, make_plugin):
-    """Same-tick race: connect dump drains before last.json reload; bypass must survive.
-
-    _pending_dump_bypass buffers AddPluginMessage bypass values during the loading
-    sequence and flushes them into the new board in set_current_pedalboard, so delay
-    ends up bypassed even though the dump was processed against the old board.
-    """
+def test_v3_reconnect_after_board_change_same_tick_applies_dump(v3_system: SystemFixture):
+    """Same tick: board B's window and the last.json flip land together; the window's
+    live state (delay bypassed at snapshot 1) is what B shows, and the last.json
+    refresh that follows does not undo it."""
     handler = v3_system.handler
-    mock_get = v3_system.mock_get
+    serve_board(v3_system, bundle="/path/to/new.pedalboard", snapshots={"0": "Default", "1": "Lead"})
 
-    drive = make_plugin("drive", category="Distortion", bypassed=False)
-    delay = make_plugin("delay", category="Delay", bypassed=False)
-    new_pb = handler.pedalboards["/path/to/new.pedalboard"]
-    new_pb.plugins = [drive, delay]
-    handler.reload_pedalboard = lambda bundle: new_pb  # LILV is patched out in tests
-
-    def get_side_effect(url, **kwargs):
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.text = (
-            json.dumps({"0": "Default", "1": "Lead"})
-            if "snapshot/list" in url
-            else json.dumps({"name": "Lead"})
-            if "snapshot/name" in url
-            else "{}"
-        )
-        return resp
-
-    mock_get.side_effect = get_side_effect
-
-    # One tick: the dump for B at live snapshot 1 (delay bypassed) is queued AND last.json flipped.
     ws_bridge = v3_system.ws_bridge
-    ws_bridge.inject("loading_start 0")
-    ws_bridge.inject("add drive http://uri 0.0 0.0 0 1 1")
-    ws_bridge.inject("add delay http://uri 0.0 0.0 1 1 1")
-    ws_bridge.inject("loading_end 1")
+    ws_bridge.inject("loading_start 0 0")
+    ws_bridge.inject("add /graph/drive http://uri 0.0 0.0 0 1 1")
+    ws_bridge.inject("add /graph/delay http://uri 100.0 0.0 1 1 1")
+    ws_bridge.inject("loading_end 1 New Rig")
 
     last_json = Path(handler.data_dir) / "last.json"
     last_json.write_text(json.dumps({"pedalboard": "/path/to/new.pedalboard"}))
     os.utime(last_json, (9999, 9999))
 
     handler.poll_modui_changes()
+    handler.poll_modui_changes()
 
     assert handler.current
-    assert handler.current.pedalboard.bundle == "/path/to/new.pedalboard"
-    assert delay.is_bypassed()  # the live snapshot; lost to .ttl default on clean core
+    board = handler.current.pedalboard
+    assert board.bundle == "/path/to/new.pedalboard"
+    assert [p.instance_id for p in board.plugins] == ["drive", "delay"]
+    delay = board.find_plugin("delay")
+    assert delay is not None and delay.is_bypassed()  # the live snapshot; lost to .ttl default on clean core
+    assert handler.current.preset_index == 1
 
 
 def test_v3_inbound_param_set_refreshes_cached_value(v3_system: SystemFixture, make_plugin, make_parameter):
@@ -949,54 +936,46 @@ def test_v3_patch_set_for_unknown_instance_is_harmless(v3_system: SystemFixture,
     assert nam.customization.extra_data is None
 
 
-def test_v3_dump_patch_set_same_tick_applies_to_new_board(v3_system: SystemFixture, make_plugin):
-    """Same-tick race, patch_set flavour: the dump drains before last.json reload
-    switches the board, so the model must be buffered and flushed into the new one."""
+def test_v3_dump_patch_set_same_tick_applies_to_new_board(v3_system: SystemFixture):
+    """patch_set flavour: the model streamed inside board B's window names B's NAM tile."""
     handler = v3_system.handler
+    serve_board(v3_system, bundle="/path/to/new.pedalboard")
 
-    nam = make_plugin("nam", category="Simulator", uri=_NAM_URI)
-    new_pb = handler.pedalboards["/path/to/new.pedalboard"]
-    new_pb.plugins = [nam]
-    handler.reload_pedalboard = lambda bundle: new_pb
-
-    ws_bridge = v3_system.ws_bridge
-    ws_bridge.inject("loading_start 0")
-    ws_bridge.inject(f"add nam {_NAM_URI} 0.0 0.0 0 1 1")
-    ws_bridge.inject(f"patch_set /graph/nam 1 {_NAM_MODEL} p /models/Marshall JCM800.nam")
-    ws_bridge.inject("loading_end 0")
-
-    last_json = Path(handler.data_dir) / "last.json"
-    last_json.write_text(json.dumps({"pedalboard": "/path/to/new.pedalboard"}))
-    os.utime(last_json, (9999, 9999))
-
-    handler.poll_modui_changes()
+    play_window(
+        v3_system,
+        [
+            "loading_start 0 0",
+            f"add /graph/nam {_NAM_URI} 0.0 0.0 0 1 1",
+            f"patch_set /graph/nam 1 {_NAM_MODEL} p /models/Marshall JCM800.nam",
+            "loading_end 0 New Rig",
+        ],
+    )
 
     assert handler.current
     assert handler.current.pedalboard.bundle == "/path/to/new.pedalboard"
-    assert nam.display_name == "Marshall JCM800"
-    assert not handler._pending_dump_patch
+    nam = handler.current.pedalboard.find_plugin("nam")
+    assert nam is not None and nam.display_name == "Marshall JCM800"
 
 
-def test_v3_loading_start_discards_previous_boards_patches(v3_system: SystemFixture, make_plugin):
-    """A patch buffered for board A must not land on board B."""
+def test_v3_loading_start_discards_previous_boards_patches(v3_system: SystemFixture):
+    """A patch streamed in a window that a new loading_start cut short must not land on the board that window builds."""
     handler = v3_system.handler
+    serve_board(v3_system, bundle="/path/to/new.pedalboard")
 
-    nam = make_plugin("nam", category="Simulator", uri=_NAM_URI)
-    new_pb = handler.pedalboards["/path/to/new.pedalboard"]
-    new_pb.plugins = [nam]
-    handler.reload_pedalboard = lambda bundle: new_pb
+    play_window(
+        v3_system,
+        [
+            "loading_start 0 0",
+            f"add /graph/nam {_NAM_URI} 0.0 0.0 0 1 1",
+            f"patch_set /graph/nam 1 {_NAM_MODEL} p /models/Stale.nam",
+            "loading_start 0 0",
+            f"add /graph/nam {_NAM_URI} 0.0 0.0 0 1 1",
+            "loading_end 0 New Rig",
+        ],
+    )
 
-    ws_bridge = v3_system.ws_bridge
-    ws_bridge.inject(f"patch_set /graph/nam 1 {_NAM_MODEL} p /models/Stale.nam")
-    ws_bridge.inject("loading_start 0")
-    ws_bridge.inject(f"add nam {_NAM_URI} 0.0 0.0 0 1 1")
-    ws_bridge.inject("loading_end 0")
-
-    last_json = Path(handler.data_dir) / "last.json"
-    last_json.write_text(json.dumps({"pedalboard": "/path/to/new.pedalboard"}))
-    os.utime(last_json, (9999, 9999))
-
-    handler.poll_modui_changes()
-
+    assert handler.current
+    nam = handler.current.pedalboard.find_plugin("nam")
+    assert nam is not None
     assert nam.customization.extra_data is None
     assert nam.display_name != "Stale"

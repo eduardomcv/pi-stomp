@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from modalapi.pedalboard import Pedalboard
+from tests.fake_board_fetcher import FakeBoardFetcher
 from tests.types import SystemFixture
 from common.parameter import BYPASS_SYMBOL, Symbol
 
@@ -267,24 +268,22 @@ def test_v3_dynamic_add_known_plugin_updates_bypass_only(parallel_beths_system: 
 
 
 def test_v3_dynamic_add_suppressed_during_connect_dump(parallel_beths_system: SystemFixture):
-    """add messages while _is_pedalboard_loading=True are connect-dump entries.
-    They must NOT trigger a dynamic add (REST call + redraw) — only bypass buffering."""
+    """add messages inside a window are connect-dump entries: the window builds the next
+    board from them. They must NOT trigger a dynamic add (REST call + redraw)."""
     handler = parallel_beths_system.handler
     ws_bridge = parallel_beths_system.ws_bridge
     parallel_beths_system.mock_get.side_effect = _effect_get_side_effect({_EXTRA_CHORUS_URI: _EXTRA_CHORUS_INFO})
-    assert handler.current
+    fetcher = handler.board_fetcher
+    assert isinstance(fetcher, FakeBoardFetcher)
     before = len(handler.current.pedalboard.plugins)
-    handler._is_pedalboard_loading = True
-    try:
-        ws_bridge.inject(f"add /graph/ExtraChorus {_EXTRA_CHORUS_URI} 900.0 50.0 0 1 1")
-        handler.poll_ws_messages()
 
-        # Plugin must NOT appear in the model during a dump
-        assert len(handler.current.pedalboard.plugins) == before
-        # Bypass IS buffered for later application when the pedalboard finishes loading
-        assert not handler._pending_dump_bypass.get("ExtraChorus")
-    finally:
-        handler._is_pedalboard_loading = False
+    ws_bridge.inject("loading_start 0 0")
+    ws_bridge.inject(f"add /graph/ExtraChorus {_EXTRA_CHORUS_URI} 900.0 50.0 0 1 1")
+    handler.poll_ws_messages()
+
+    assert len(handler.current.pedalboard.plugins) == before
+    assert fetcher.requests == []
+    assert not [c for c in parallel_beths_system.mock_get.call_args_list if "effect/get" in c.args[0]]
 
 
 def test_v3_dynamic_add_no_metadata_adds_bypass_only_tile(parallel_beths_system: SystemFixture):

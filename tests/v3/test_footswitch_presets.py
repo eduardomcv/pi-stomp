@@ -195,7 +195,7 @@ class TestPresetFootswitchLabelSurvivesRelight:
         pb = handler.pedalboards["/path/to/new.pedalboard"]
         pb.bundle = str(bundle_dir)
         pb.plugins = []
-        handler.set_current_pedalboard(pb)
+        handler.install_board(pb, {0: "Clean", 1: "Lead"}, 0, sync_blend=True)
 
         fs1 = hw.footswitches[1]
         assert fs1.midi_CC is None  # cleared by the preset config, as expected

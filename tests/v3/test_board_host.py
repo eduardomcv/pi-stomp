@@ -103,13 +103,31 @@ def test_install_board_syncs_blend_only_when_asked_and_bundled(parallel_beths_sy
     assert len(blend_syncs) == 1
 
 
-def test_set_current_pedalboard_reads_presets_from_mod_ui(parallel_beths_system):
-    handler = parallel_beths_system.handler
-    handler.next_pedalboard_preset_index = 1
-    handler.set_current_pedalboard(handler.pedalboards["/path/to/new.pedalboard"])
-    assert handler.current.presets == {0: "Clean", 1: "Lead"}
+def test_set_current_pedalboard_installs_default_presets_without_asking_mod_ui(parallel_beths_system):
+    system = parallel_beths_system
+    handler = system.handler
+    board = handler.pedalboards["/path/to/new.pedalboard"]
+    handler.set_current_pedalboard(board)
+    assert handler.current.pedalboard is board
+    assert handler.current.presets == {0: "Default"}
     assert handler.current.preset_index == 0
-    assert handler.next_pedalboard_preset_index is None
+    assert not [c for c in system.mock_get.call_args_list if "snapshot/" in c.args[0]]
+
+
+def test_installed_presets_are_a_copy(parallel_beths_system):
+    handler = parallel_beths_system.handler
+    presets = {0: "A"}
+    handler.install_board(Pedalboard.empty(handler.customizer), presets, 0)
+    handler.current.presets[1] = "B"
+    assert presets == {0: "A"}
+
+
+def test_reconciled_presets_are_a_copy(parallel_beths_system):
+    handler = parallel_beths_system.handler
+    presets = {0: "A"}
+    handler.reconcile_board(_candidate_from(parallel_beths_system), presets, 0)
+    handler.current.presets[1] = "B"
+    assert presets == {0: "A"}
 
 
 def test_reconcile_updates_values_bypass_and_title_but_keeps_the_plugin_objects(parallel_beths_system):

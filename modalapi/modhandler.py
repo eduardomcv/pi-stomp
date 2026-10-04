@@ -35,7 +35,7 @@ from collections.abc import Callable
 from dataclasses import replace
 import functools
 from functools import cached_property
-from typing import cast, Any
+from typing import Any
 
 import common.token as Token
 import common.util as util
@@ -61,8 +61,8 @@ from common.contexts import (
 from common.parameter import BYPASS_SYMBOL, Parameter, PortInfo, Symbol
 from common.param_source import ParamSink
 from common.parameter_editing import EditContext, ParameterSteps, effective_multiplier
-from modalapi.board_fetch import BoardFetcher, BoardJob, Fetcher, MetadataFetched
-from modalapi.board_sync import UNTITLED
+from modalapi.board_fetch import BoardFetcher, BoardJob, BoardResolved, Fetcher, MetadataFetched
+from modalapi.board_sync import UNTITLED, BoardSync
 from modalapi.pending_add import PendingAdds
 from modalapi.plugin import Plugin
 from blend.input_controller import InputController
@@ -170,6 +170,7 @@ class Modhandler(Handler):
         self.patch_parser = patch_extra_data
         self.board_fetcher: Fetcher = self._make_fetcher()
         self._pending_adds = PendingAdds()
+        self._board_sync = BoardSync(self)
 
         # Unbound encoders own no value; the handler (the emitter) keeps their
         # MIDI-learn fallback CC, keyed by "channel:CC" so it persists across
@@ -188,15 +189,6 @@ class Modhandler(Handler):
         self._lcd: Lcd | None = None
         self._hardware: Hardware | None = None
         self.volume_parameter = None
-
-        # Stores snapshot index from loading_end until pedalboard change is detected
-        self.next_pedalboard_preset_index = None
-
-        # Bypass values from the connect dump (loading_start … loading_end); keyed by
-        # instance_id.  Applied after the new board loads when the dump and the
-        # last.json reload land in the same poll tick.
-        self._pending_dump_bypass: dict[str, bool] = {}
-        self._pending_dump_patch: dict[tuple[str, str], str] = {}
 
         # Backup
         self.backup_file = "pistomp_backup.zip"
@@ -782,58 +774,31 @@ class Modhandler(Handler):
 
     def _handle_ws_message(self, msg: WebSocketMessage):
         """Handle incoming WebSocket message from MOD-UI."""
+        if self._board_sync.feed(msg):
+            return
         if self._pending_adds and self._pending_adds.defer(msg):
             return
         if isinstance(msg, LoadingStartMessage):
             self._is_pedalboard_loading = True
-            self._pending_dump_bypass.clear()
-            self._pending_dump_patch.clear()
             self._pending_adds.clear()
             cleared = self.ws_bridge.clear_queue()
             if cleared:
                 logging.debug(f"Cleared {cleared} stale outbound messages on loading_start")
 
         elif isinstance(msg, LoadingEndMessage):
-            # Sometimes mod-ui sends us -1 for preset index, but shows 0 anyway ("Default")
-            self.next_pedalboard_preset_index = max(0, msg.snapshot_id)
             self._is_pedalboard_loading = False
 
         elif isinstance(msg, PedalSnapshotMessage):
-            if self.next_pedalboard_preset_index is not None:
-                # Check if we're still on the same pedalboard (stale flag from previous load)
-                mod_bundle = read_pedalboard_bundle(self.last_json_monitor.path)
-                if mod_bundle and self._current is not None and mod_bundle == self._current.pedalboard.bundle:
-                    # Same pedalboard - this is a new snapshot on current board, not a pre-switch
-                    logging.debug(
-                        f"WebSocket: Snapshot changed to {msg.snapshot_id} ({msg.snapshot_name}) - clearing stale pre-switch flag"
-                    )
-                    self.next_pedalboard_preset_index = None
-
-                    if msg.snapshot_id not in self.current.presets:
-                        self.current.presets[msg.snapshot_id] = msg.snapshot_name
-
-                    self.current.preset_index = msg.snapshot_id
-                    self._handle_blend_mode_snapshot_change(msg.snapshot_id)
-                    self.lcd.draw_title()
-                else:
-                    # Different pedalboard pending - this is a legitimate pre-switch update
-                    logging.debug(f"WebSocket: Pre-switch snapshot changed to {msg.snapshot_id}")
-                    self.next_pedalboard_preset_index = msg.snapshot_id
-            else:
-                assert self._current is not None, "Received snapshot message but no current pedalboard is set"
-                logging.debug(f"WebSocket: Snapshot changed to {msg.snapshot_id} ({msg.snapshot_name})")
-
-                if msg.snapshot_id not in self.current.presets:
-                    self.current.presets[msg.snapshot_id] = msg.snapshot_name
-
-                self.current.preset_index = msg.snapshot_id
-                self._handle_blend_mode_snapshot_change(msg.snapshot_id)
-                self.lcd.draw_title()
+            if self._current is None:
+                return
+            logging.debug(f"WebSocket: Snapshot changed to {msg.snapshot_id} ({msg.snapshot_name})")
+            if msg.snapshot_id not in self.current.presets:
+                self.current.presets[msg.snapshot_id] = msg.snapshot_name
+            self.current.preset_index = msg.snapshot_id
+            self._handle_blend_mode_snapshot_change(msg.snapshot_id)
+            self.lcd.draw_title()
 
         elif isinstance(msg, AddPluginMessage):
-            # Buffer bypass for the connect-dump race (dump may drain before
-            # last.json reload sets current).
-            self._pending_dump_bypass[msg.instance] = msg.bypassed
             if self._current is not None:
                 known = next(
                     (p for p in self.current.pedalboard.plugins if p.instance_id == msg.instance),
@@ -957,9 +922,6 @@ class Modhandler(Handler):
         """A plugin's writable property changed. This is the only source of extra
         data for a freshly added plugin — it has no effect-N bundle on disk until
         the board is saved."""
-        # Buffer for the connect-dump race, same as bypass: the dump can drain
-        # before last.json reload sets current.
-        self._pending_dump_patch[(msg.instance, msg.param_uri)] = msg.value
         if self._current is None:
             return
         plugin = next(
@@ -991,12 +953,20 @@ class Modhandler(Handler):
 
     def _drain_board_fetcher(self) -> None:
         for fetched in self.board_fetcher.drain():
-            if not isinstance(fetched, MetadataFetched):
+            if isinstance(fetched, BoardResolved):
+                self._guarded(self._board_sync.on_resolved, fetched)
                 continue
             try:
                 self._apply_fetched(fetched)
             except Exception as e:
                 logging.error(f"Error applying fetched plugin metadata for {fetched.requested}: {e}")
+
+    @staticmethod
+    def _guarded(step: Callable[..., None], *args: object) -> None:
+        try:
+            step(*args)
+        except Exception:
+            logging.exception("board sync step failed")
 
     def _apply_fetched(self, fetched: MetadataFetched) -> None:
         self.plugin_dict.update(fetched.info)
@@ -1028,7 +998,6 @@ class Modhandler(Handler):
 
     def poll_ws_messages(self):
         """Drain inbound WS messages (fast ~10ms cadence). Main-thread only.
-        Must not touch next_pedalboard_preset_index (owned by the file-watch path).
         A drain's param_set burst collapses to the last per (instance, symbol)
         before dispatch, so a fast scrub repaints once, not once per echo."""
         raw = self.ws_bridge.get_received_messages()
@@ -1041,11 +1010,10 @@ class Modhandler(Handler):
         for msg in coalesce_param_sets(parsed):
             self._dispatch_ws_message(msg)
         self._drain_board_fetcher()
+        self._guarded(self._board_sync.poll)
 
     def poll_modui_changes(self):
         """Poll for changes from MOD-UI: websockets and file watching"""
-        # Drain WS first so loading_end/snapshot lands before the file-watch
-        # reads next_pedalboard_preset_index this tick. No-op if already drained.
         self.poll_ws_messages()
         self._poll_ws_reconnect()
 
@@ -1054,34 +1022,8 @@ class Modhandler(Handler):
         if self._restoring:
             return
 
-        # Check for pedalboard change via last.json
         if self.last_json_monitor.check_for_change():
-            self.lcd.draw_info_message("Loading...")
-            mod_bundle = read_pedalboard_bundle(self.last_json_monitor.path)
-            if mod_bundle and self._current is not None and mod_bundle != self._current.pedalboard.bundle:
-                logging.info(f"Pedalboard changed via MOD from: {self.current.pedalboard.bundle} to: {mod_bundle}")
-
-                if mod_bundle not in self.pedalboards:
-                    self.load_pedalboards()
-                if mod_bundle not in self.pedalboards:
-                    # MOD-UI owns this relationship; if its own list still lacks
-                    # the bundle we have nothing to load and no business picking
-                    # a substitute mid-session. Keep the board we have.
-                    logging.warning("last.json names a pedalboard MOD-UI does not list: %s", mod_bundle)
-                    self.lcd.link_data(self.pedalboard_list, self.current, self.hardware.footswitches)
-                    self.lcd.draw_main_panel()
-                    return
-
-                pb = self.reload_pedalboard(mod_bundle)
-                self.set_current_pedalboard(pb)
-                self._stamp(mod_bundle, None)
-            elif mod_bundle and self._current is not None and self.next_pedalboard_preset_index is not None:
-                # Same pedalboard reloaded with a pending snapshot - apply it now
-                logging.info(f"Applying pending snapshot {self.next_pedalboard_preset_index} to current pedalboard")
-                self.current.preset_index = self.next_pedalboard_preset_index
-                self._handle_blend_mode_snapshot_change(self.next_pedalboard_preset_index)
-                self.next_pedalboard_preset_index = None
-                self.lcd.draw_title()
+            self._board_sync.request_rebase()
 
         # Look for a change in banks file
         if self.banks_monitor.check_for_change():
@@ -1167,41 +1109,18 @@ class Modhandler(Handler):
         except Exception:
             logging.debug("pistomp-stamp failed", exc_info=True)
 
-    def reload_pedalboard(self, bundle):
-        # find the current pedalboard object associated with that bundle
-        old = self.pedalboards[bundle]
-        title = old.title
-
-        # create a new one
-        pedalboard = Pedalboard.Pedalboard(title, bundle, root_uri=self.root_uri, customizer=plugin_lookup)
-        pedalboard.hydrate(self.plugin_dict)
-        self.pedalboards[bundle] = pedalboard
-
-        # replace the pedalboard in pedalboard_list with the new one
-        try:
-            index = self.pedalboard_list.index(old)
-        except Exception:
-            logging.error("Cannot locate pedalboard: %s", title)
-        else:
-            self.pedalboard_list[index] = pedalboard
-        del old
-
-        return pedalboard
-
     def get_current_pedalboard_bundle_path(self):
         return read_pedalboard_bundle(self.last_json_monitor.path)
 
     def set_current_pedalboard(self, pedalboard):
-        self._pending_adds.clear()
-        pedalboard.hydrate(self.plugin_dict)
-        presets, index = self._read_presets(self.next_pedalboard_preset_index or 0)
-        self.next_pedalboard_preset_index = None
-        self.install_board(pedalboard, presets, index, sync_blend=True)
+        pedalboard.hydrate(self.plugin_dict)  # removed in Task 7
+        self.install_board(pedalboard, {0: "Default"}, 0, sync_blend=True)
 
     def install_board(
-        self, pedalboard: Pedalboard.Pedalboard, presets: dict[int, str], preset_index: int, *, sync_blend: bool = False
+        self, board: Pedalboard.Pedalboard, presets: dict[int, str], preset_index: int, *, sync_blend: bool = False
     ) -> None:
         self._pending_adds.clear()
+        previous = self.current_board()
 
         # Pop non-persisting panels above the first persister (e.g. a parameter
         # dialog or plugin panel is dismissed; the tuner survives).
@@ -1229,28 +1148,11 @@ class Modhandler(Handler):
         del self._current
 
         # Create a new "current"
-        self._current = Current(pedalboard)
-        self.current.presets = presets
+        self._current = Current(board)
+        self.current.presets = dict(presets)
         self.current.preset_index = preset_index
 
-        # Flush any buffered connect-dump bypass values from the same-tick race
-        # (dump drained before last.json reload switched the board).
-        if self._pending_dump_bypass:
-            for plugin in pedalboard.plugins:
-                if plugin.instance_id in self._pending_dump_bypass:
-                    plugin.set_bypass(self._pending_dump_bypass[plugin.instance_id])
-            self._pending_dump_bypass.clear()
-
-        # Same race, same scoping: only instances present on the board being
-        # made current are applied; anything else is dropped with the buffer.
-        if self._pending_dump_patch:
-            for plugin in pedalboard.plugins:
-                for (instance, param_uri), value in self._pending_dump_patch.items():
-                    if instance == plugin.instance_id:
-                        self._apply_patch(plugin, param_uri, value)
-            self._pending_dump_patch.clear()
-
-        pedalboard_config = config.resolve(self.hardware.default_cfg, pedalboard.bundle)
+        pedalboard_config = config.resolve(self.hardware.default_cfg, board.bundle)
         self.hardware.reinit(pedalboard_config)
 
         # Initialize the data and draw on LCD
@@ -1268,7 +1170,7 @@ class Modhandler(Handler):
             logging.warning(f"Failed to send external MIDI messages: {e}")
 
         # Prepare blend modes if configured (snapshot-based activation)
-        if sync_blend and pedalboard.bundle is not None:
+        if sync_blend and board.bundle is not None:
             try:
                 blend_configs = pedalboard_config.blend_snapshots
                 bundle_path = Path(self.current.pedalboard.bundle)
@@ -1309,6 +1211,8 @@ class Modhandler(Handler):
         # Caught up with mod-ui.
         self._is_pedalboard_loading = False
         self.hardware.sync_analog_controls()
+        if sync_blend and previous is not None:
+            self._stamp(board.bundle, previous.bundle)
 
     def current_board(self) -> Pedalboard.Pedalboard | None:
         return self._current.pedalboard if self._current is not None else None
@@ -1343,6 +1247,7 @@ class Modhandler(Handler):
 
     def reconcile_board(self, candidate: Pedalboard.Pedalboard, presets: dict[int, str], preset_index: int) -> None:
         live = self.current.pedalboard
+        renamed = False
         for new in [*candidate.plugins, candidate.transport_plugin]:
             old = live.find_plugin(new.instance_id)
             if old is None:
@@ -1362,17 +1267,22 @@ class Modhandler(Handler):
                     self._apply_midi_binding(old.instance_id, symbol, param.binding, (param.minimum, param.maximum))
             if new.customization.extra_data != old.customization.extra_data:
                 old.customization = replace(old.customization, extra_data=new.customization.extra_data)
+                renamed = True
             old.pedalboard_snapshot = dict(new.pedalboard_snapshot)
         live.title = candidate.title
-        self.current.presets, self.current.preset_index = presets, preset_index
-        self.lcd.draw_main_panel()
+        self.current.presets, self.current.preset_index = dict(presets), preset_index
+        # Tiles follow bypass and values themselves; a full redraw would move the selection to the wrench.
+        if renamed:
+            self.lcd.draw_main_panel()
+        else:
+            self.lcd.draw_title()
 
     def rebase_board(self, bundle: str | None, presets: dict[int, str] | None) -> None:
         if self._current is None:
             return
         board = self.current.pedalboard
         if presets:
-            self.current.presets = presets
+            self.current.presets = dict(presets)
             if self.current.preset_index not in presets:
                 self.current.preset_index = min(presets)
         if bundle != board.bundle:
@@ -1540,36 +1450,6 @@ class Modhandler(Handler):
             if cur > 0:
                 return indices[cur - 1]
             return max(indices)
-
-    def load_current_presets(self) -> None:
-        if not self._current:
-            logging.error("Cannot load presets since current pedalboard is not set")
-            return
-        self.current.presets, self.current.preset_index = self._read_presets(self.current.preset_index)
-
-    def _read_presets(self, preset_index: int = 0) -> tuple[dict[int, str], int]:
-        presets: dict[int, str] = {}
-        url = self.root_uri + "snapshot/list"
-        resp = self._rest_get(url)
-        if resp is None or resp.status_code != 200:
-            return presets, preset_index
-
-        for key, name in json.loads(resp.text).items():
-            if key.isdigit():
-                presets[int(key)] = name
-
-        # Get current snapshot (preset) info
-        url = self.root_uri + "snapshot/name?id=current"  # this will fail (500) for non pi-stomp versions of mod-ui
-        resp = self._rest_get(url)
-        if resp is None:
-            return presets, preset_index
-
-        if resp.status_code == 200 and resp.text is not None:
-            current_snapshot_name = cast(str, util.DICT_GET(json.loads(resp.text), "name"))
-            for i, n in presets.items():
-                if n == current_snapshot_name:
-                    return presets, i
-        return presets, preset_index
 
     def preset_change(self, index):
         if not self._current:

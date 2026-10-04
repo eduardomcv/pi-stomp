@@ -1,42 +1,29 @@
-"""Pedalboard switching via MOD-UI file-watch and LCD encoder navigation — v3 LCD layout."""
+"""Pedalboard switching via MOD-UI's board stream and LCD encoder navigation — v3 LCD layout."""
 
 import json
 import os
 from pathlib import Path
-from unittest.mock import MagicMock
 
+import common.token as Token
+from modalapi.pedalboard import Pedalboard
+from tests.board_window import play_window, serve_board
+from tests.replay_helpers import board_to_replay_lines
 from tests.types import SystemFixture
 from tests.v3.nav_helpers import nav_click
 
 
-def test_v3_pedalboard_change_via_modui(v3_system: SystemFixture, make_plugin, snapshot):
-    """MOD-UI writes last.json → poll_modui_changes() reloads without a load_bundle POST."""
+def _stream_board(system: SystemFixture, board: Pedalboard) -> None:
+    """mod-ui loads `board`: it streams the board's window and then answers its REST queries."""
+    serve_board(system, bundle=board.bundle, snapshots={"0": "Default"})
+    play_window(system, board_to_replay_lines(board, empty=False, modified=False, sid=0))
+
+
+def test_v3_pedalboard_change_via_modui(v3_system: SystemFixture, snapshot):
+    """MOD-UI loads another board → its window swaps it in without a load_bundle POST."""
     handler = v3_system.handler
-    mock_get = v3_system.mock_get
     mock_post = v3_system.mock_post
 
-    pb2 = handler.pedalboards["/path/to/new.pedalboard"]
-    pb2.plugins = [make_plugin("fuzz", category="Distortion")]
-
-    def get_side_effect(url, **kwargs):
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.text = (
-            json.dumps({"0": "Default"})
-            if "snapshot/list" in url
-            else json.dumps({"name": "Default"})
-            if "snapshot/name" in url
-            else "{}"
-        )
-        return resp
-
-    mock_get.side_effect = get_side_effect
-
-    last_json = Path(handler.data_dir) / "last.json"
-    last_json.write_text(json.dumps({"pedalboard": "/path/to/new.pedalboard"}))
-    os.utime(last_json, (9999, 9999))
-
-    handler.poll_modui_changes()
+    _stream_board(v3_system, handler.pedalboards["/path/to/new.pedalboard"])
 
     post_urls = [c.args[0] for c in mock_post.call_args_list]
     assert not any("load_bundle" in u for u in post_urls)
@@ -45,13 +32,11 @@ def test_v3_pedalboard_change_via_modui(v3_system: SystemFixture, make_plugin, s
     snapshot()
 
 
-def test_v3_pedalboard_change_via_lcd(v3_system: SystemFixture, nav_handler, make_plugin, snapshot, get_urls):
-    """Encoder selects the second board → POST load_bundle fires, MOD-UI confirms via last.json."""
+def test_v3_pedalboard_change_via_lcd(v3_system: SystemFixture, nav_handler, snapshot, get_urls):
+    """Encoder selects the second board → POST load_bundle fires, MOD-UI confirms with the board's window."""
     handler = v3_system.handler
     mock_get = v3_system.mock_get
     mock_post = v3_system.mock_post
-
-    handler.pedalboards["/path/to/new.pedalboard"].plugins = [make_plugin("fuzz")]
 
     nav_handler(1)
     nav_click(handler)
@@ -61,25 +46,7 @@ def test_v3_pedalboard_change_via_lcd(v3_system: SystemFixture, nav_handler, mak
     assert any("pedalboard/load_bundle" in u for u in get_urls(mock_post))
     assert any("reset" in u for u in get_urls(mock_get))
 
-    def get_side_effect(url, **kwargs):
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.text = (
-            json.dumps({"0": "Default"})
-            if "snapshot/list" in url
-            else json.dumps({"name": "Default"})
-            if "snapshot/name" in url
-            else "{}"
-        )
-        return resp
-
-    mock_get.reset_mock()
-    mock_get.side_effect = get_side_effect
-
-    last_json = Path(handler.data_dir) / "last.json"
-    last_json.write_text(json.dumps({"pedalboard": "/path/to/new.pedalboard"}))
-    os.utime(last_json, (9999, 9999))
-    handler.poll_modui_changes()
+    _stream_board(v3_system, handler.pedalboards["/path/to/new.pedalboard"])
 
     assert handler.current
     assert handler.current.pedalboard.title == "New Rig"
@@ -115,46 +82,25 @@ def test_v3_pedalboard_selection_menu_shows_all_boards(v3_system: SystemFixture,
     snapshot()
 
 
-def _list_side_effect(boards: list[tuple[str, str]]):
-    """mock_get side effect where pedalboard/list returns exactly `boards` as (title, bundle)."""
-
-    def side_effect(url, **_kwargs):
-        resp = MagicMock()
-        resp.status_code = 200
-        if "pedalboard/list" in url:
-            resp.text = json.dumps([{"title": t, "bundle": b} for t, b in boards])
-        elif "snapshot/list" in url:
-            resp.text = json.dumps({"0": "Default"})
-        elif "snapshot/name" in url:
-            resp.text = json.dumps({"name": "Default"})
-        else:
-            resp.text = "{}"
-        return resp
-
-    return side_effect
-
-
 def test_v3_refetch_for_unknown_bundle_does_not_duplicate_list(v3_system: SystemFixture):
-    """last.json naming a board we haven't cached refetches the list. The refetch
+    """A window naming a board we haven't cached refetches the list. The refetch
     rebuilds it — a board known before must not appear twice afterwards."""
     handler = v3_system.handler
 
     before = [pb.bundle for pb in handler.pedalboard_list]
     assert before == ["/path/to/rig.pedalboard", "/path/to/new.pedalboard"]
 
-    v3_system.mock_get.side_effect = _list_side_effect(
-        [
-            ("Integration Rig", "/path/to/rig.pedalboard"),
-            ("New Rig", "/path/to/new.pedalboard"),
-            ("Restored Rig", "/path/to/restored.pedalboard"),
-        ]
+    restored = Pedalboard("Restored Rig", "/path/to/restored.pedalboard")
+    serve_board(
+        v3_system,
+        bundle=restored.bundle,
+        boards=[
+            {Token.TITLE: "Integration Rig", Token.BUNDLE: "/path/to/rig.pedalboard"},
+            {Token.TITLE: "New Rig", Token.BUNDLE: "/path/to/new.pedalboard"},
+            {Token.TITLE: "Restored Rig", Token.BUNDLE: "/path/to/restored.pedalboard"},
+        ],
     )
-
-    last_json = Path(handler.data_dir) / "last.json"
-    last_json.write_text(json.dumps({"pedalboard": "/path/to/restored.pedalboard"}))
-    os.utime(last_json, (9999, 9999))
-
-    handler.poll_modui_changes()
+    play_window(v3_system, board_to_replay_lines(restored, empty=True, modified=False, sid=0))
 
     assert handler.current
     assert handler.current.pedalboard.title == "Restored Rig"
@@ -172,13 +118,7 @@ def test_v3_refetch_drops_boards_modui_no_longer_lists(v3_system: SystemFixture)
     """A board deleted in MOD-UI leaves both the dict and the nav list on refetch."""
     handler = v3_system.handler
 
-    v3_system.mock_get.side_effect = _list_side_effect(
-        [
-            ("Integration Rig", "/path/to/rig.pedalboard"),
-        ]
-    )
-
-    handler.load_pedalboards()
+    handler.update_board_list((("Integration Rig", "/path/to/rig.pedalboard"),))
 
     assert "/path/to/new.pedalboard" not in handler.pedalboards
     assert [pb.bundle for pb in handler.pedalboard_list] == ["/path/to/rig.pedalboard"]
