@@ -28,7 +28,6 @@ import logging
 import os
 from functools import cached_property
 
-import modalapi.pedalboard as Pedalboard
 from modalapi.modhandler import Modhandler
 from modalapi.pedalboard_monitor import FileChangeMonitor
 from modalapi.websocket_bridge import AsyncWebSocketBridge
@@ -75,10 +74,6 @@ class EmulatorModhandler(Modhandler):
 
     def set_window(self, window):
         self._window = window
-
-    def pedalboard_change(self, pedalboard: Pedalboard.Pedalboard) -> None:
-        super().pedalboard_change(pedalboard)
-        self.set_current_pedalboard(pedalboard)
 
     # -------------------------------------------------------------------------
     # Skip Pi-only system calls

@@ -349,13 +349,15 @@ into the model.
 ### Known limitations
 
 1. **Reset baseline.** A plugin panel's Reset restores `pedalboard_snapshot`, captured
-   when the board is built. After a pi-Stomp restart while mod-ui holds unsaved edits,
-   the board is built from the live (edited) values, so Reset on an edited parameter is
-   a no-op until the board is reloaded. Owner decision.
+   when the board is built and overwritten by `reconcile_board`. After a pi-Stomp
+   restart while mod-ui holds unsaved edits, or a WebSocket reconnect replay (or any
+   same-structure reload) with unsaved edits, the board is built or re-baselined from
+   the live (edited) values, so Reset on an edited parameter is a no-op until the board
+   is reloaded. Owner decision.
 2. **Edits during resolution.** Edits made on the device between `loading_end` and the
    swap are not echoed back to the sender by mod-ui, so the new board does not reflect
-   them until its next echo. The gap is the resolution round trip: tens of ms with
-   cached metadata, up to a few seconds on a first load with uncached metadata.
+   them until its next echo. The gap lasts as long as the resolution round trip, and
+   is longer when plugin metadata is not cached.
 
 ## Blend Mode
 

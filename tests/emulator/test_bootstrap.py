@@ -50,3 +50,17 @@ def test_bootstrap_starts_empty_when_nothing_streams(emulator_env):
 
     assert handler.hardware is not None
     handler.hardware.cleanup()
+
+
+def test_choosing_a_board_leaves_the_install_to_the_stream(emulator_env):
+    handler, _ = bootstrap_emulator("emulator_v3", PROJECT_ROOT, initial_board_timeout_s=0.05)
+    shown = handler.current.pedalboard  # pyright: ignore[reportAttributeAccessIssue]
+    assert handler.pedalboard_list
+
+    handler.pedalboard_change(handler.pedalboard_list[0])
+
+    assert handler.current.pedalboard is shown  # pyright: ignore[reportAttributeAccessIssue]
+    assert shown.bundle is None
+
+    assert handler.hardware is not None
+    handler.hardware.cleanup()
