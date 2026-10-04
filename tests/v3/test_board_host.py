@@ -1,8 +1,8 @@
 import pytest
 
-from common.parameter import Parameter, PortInfo, Symbol
+from common.parameter import BYPASS_SYMBOL, Parameter, PortInfo, Symbol
 from modalapi.board_sync import UNTITLED
-from modalapi.pedalboard import Pedalboard
+from modalapi.pedalboard import BPM_SYMBOL, Pedalboard
 from modalapi.plugin import Plugin
 from tests.types import SystemFixture
 from uilib.misc import InputEvent
@@ -37,6 +37,7 @@ def _candidate_from(system: SystemFixture) -> Pedalboard:
                 p.value,
                 p.binding,
                 live.instance_id,
+                (p.minimum, p.maximum),
             )
             for symbol, p in live.parameters.items()
         }
@@ -73,10 +74,33 @@ def test_install_board_clears_the_loading_flag(parallel_beths_system):
     assert handler._is_pedalboard_loading is False
 
 
-def test_install_board_without_a_bundle_never_touches_blend(parallel_beths_system):
+@pytest.fixture
+def blend_syncs(monkeypatch):
+    calls = []
+
+    def spy(bundle_path, blend_configs, root_uri):
+        calls.append(bundle_path)
+        return {}
+
+    monkeypatch.setattr("modalapi.modhandler.SnapshotManager.sync_blend_snapshots", spy)
+    return calls
+
+
+def test_install_board_without_a_bundle_never_syncs_blend(parallel_beths_system, blend_syncs, caplog):
     handler = parallel_beths_system.handler
     handler.install_board(Pedalboard.empty(handler.customizer), {0: "Default"}, 0, sync_blend=True)
-    assert handler.blend_modes == {}
+    assert blend_syncs == []
+    assert "Failed to prepare blend modes" not in caplog.text
+
+
+def test_install_board_syncs_blend_only_when_asked_and_bundled(parallel_beths_system, blend_syncs):
+    handler = parallel_beths_system.handler
+    bundled = Pedalboard.empty(handler.customizer)
+    bundled.bundle = "/path/to/rig.pedalboard"
+    handler.install_board(bundled, {0: "Default"}, 0)
+    assert blend_syncs == []
+    handler.install_board(bundled, {0: "Default"}, 0, sync_blend=True)
+    assert len(blend_syncs) == 1
 
 
 def test_set_current_pedalboard_reads_presets_from_mod_ui(parallel_beths_system):
@@ -108,24 +132,86 @@ def test_reconcile_updates_values_bypass_and_title_but_keeps_the_plugin_objects(
     assert handler.current.presets == {0: "Only"}
 
 
-def test_reconcile_adopts_a_binding_range(parallel_beths_system):
+def _bound_gain_on_every_plugin(system: SystemFixture, binding: str, binding_range=None) -> None:
+    for plugin in system.handler.current.pedalboard.plugins:
+        plugin.parameters[GAIN] = _gain(plugin.instance_id, 0.25, binding, binding_range)
+
+
+@pytest.fixture
+def rebinds(parallel_beths_system, monkeypatch):
+    calls = []
+    monkeypatch.setattr(parallel_beths_system.handler, "_rebind_pedalboard", lambda: calls.append(1))
+    return calls
+
+
+def test_reconcile_restores_the_declared_range_when_the_cc_is_kept(parallel_beths_system, rebinds):
     handler = parallel_beths_system.handler
-    _give_every_plugin_a_gain(parallel_beths_system)
+    _bound_gain_on_every_plugin(parallel_beths_system, "13:70", (0.2, 0.8))
+    candidate = _candidate_from(parallel_beths_system)
+    candidate.plugins[0].parameters[GAIN].clear_binding_range()
+
+    handler.reconcile_board(candidate, {0: "Default"}, 0)
+
+    live = handler.current.pedalboard.plugins[0].parameters[GAIN]
+    assert (live.minimum, live.maximum) == (live.declared_minimum, live.declared_maximum)
+    assert live.binding == "13:70"
+    assert rebinds == []
+
+
+def test_reconcile_adopts_a_custom_range_when_the_cc_is_kept(parallel_beths_system, rebinds):
+    handler = parallel_beths_system.handler
+    _bound_gain_on_every_plugin(parallel_beths_system, "13:70")
     candidate = _candidate_from(parallel_beths_system)
     candidate.plugins[0].parameters[GAIN].set_binding_range((0.2, 0.8))
-    candidate.plugins[0].parameters[GAIN].binding = "0:20"
 
     handler.reconcile_board(candidate, {0: "Default"}, 0)
 
     live = handler.current.pedalboard.plugins[0].parameters[GAIN]
     assert (live.minimum, live.maximum) == (0.2, 0.8)
+    assert live.binding == "13:70"
+    assert rebinds == []
 
 
-def test_binding_range_of_is_none_unless_it_differs_from_declared(parallel_beths_system):
-    param = _gain("Comp", 0.5)
-    assert parallel_beths_system.handler._binding_range_of(param) is None
-    param.set_binding_range((0.1, 0.9))
-    assert parallel_beths_system.handler._binding_range_of(param) == (0.1, 0.9)
+def test_reconcile_reconciles_a_changed_bypass_binding(parallel_beths_system, rebinds):
+    handler = parallel_beths_system.handler
+    candidate = _candidate_from(parallel_beths_system)
+    candidate.plugins[0].parameters[BYPASS_SYMBOL].binding = "13:60"
+    live = handler.current.pedalboard.plugins[0]
+    assert live.parameters[BYPASS_SYMBOL].binding is None
+
+    handler.reconcile_board(candidate, {0: "Default"}, 0)
+
+    assert live.parameters[BYPASS_SYMBOL].binding == "13:60"
+    assert rebinds == [1]
+
+
+def test_reconcile_unbinds_what_the_candidate_no_longer_binds(parallel_beths_system, rebinds):
+    handler = parallel_beths_system.handler
+    _bound_gain_on_every_plugin(parallel_beths_system, "13:70", (0.2, 0.8))
+    candidate = _candidate_from(parallel_beths_system)
+    unbound = candidate.plugins[0].parameters[GAIN]
+    unbound.binding = None
+    unbound.clear_binding_range()
+
+    handler.reconcile_board(candidate, {0: "Default"}, 0)
+
+    live = handler.current.pedalboard.plugins[0].parameters[GAIN]
+    assert live.binding is None
+    assert (live.minimum, live.maximum) == (live.declared_minimum, live.declared_maximum)
+
+
+def test_reconcile_value_only_change_leaves_bindings_alone(parallel_beths_system, rebinds):
+    handler = parallel_beths_system.handler
+    _bound_gain_on_every_plugin(parallel_beths_system, "13:70", (0.2, 0.8))
+    candidate = _candidate_from(parallel_beths_system)
+    candidate.plugins[0].parameters[GAIN].reconcile(0.6)
+
+    handler.reconcile_board(candidate, {0: "Default"}, 0)
+
+    live = handler.current.pedalboard.plugins[0].parameters[GAIN]
+    assert live.value == pytest.approx(0.6)
+    assert (live.binding, live.minimum, live.maximum) == ("13:70", 0.2, 0.8)
+    assert rebinds == []
 
 
 def test_reconcile_keeps_an_open_plugin_panel_and_install_pops_it(parallel_beths_system):
@@ -154,6 +240,24 @@ def test_clear_board_empties_in_place_without_a_hardware_reinit(parallel_beths_s
     assert (board.title, board.bundle) == (UNTITLED, None)
     assert handler.current.presets == {0: "Default"} and handler.current.preset_index == 0
     assert reinit_calls == []
+
+
+def test_clear_board_resets_the_transport_and_releases_its_controllers(parallel_beths_system):
+    handler = parallel_beths_system.handler
+    old_bpm = handler.current.pedalboard.transport_plugin.parameters[BPM_SYMBOL]
+    old_bpm.reconcile(90.0)
+    old_bpm.binding = "13:70"
+    handler.bind_current_pedalboard()
+    controller = handler.hardware.controllers["13:70"]
+    assert handler.current.control_for(old_bpm) is controller
+
+    handler.clear_board()
+
+    new_bpm = handler.current.pedalboard.transport_plugin.parameters[BPM_SYMBOL]
+    assert new_bpm is not old_bpm
+    assert (new_bpm.value, new_bpm.binding) == (120.0, None)
+    assert handler.current.control_for(old_bpm) is None
+    assert controller.parameter is not old_bpm
 
 
 def test_rebase_adopts_a_new_bundle_title_and_reapplies_the_config(parallel_beths_system):

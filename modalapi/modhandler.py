@@ -1167,11 +1167,6 @@ class Modhandler(Handler):
         except Exception:
             logging.debug("pistomp-stamp failed", exc_info=True)
 
-    @staticmethod
-    def _binding_range_of(param: Parameter) -> tuple[float, float] | None:
-        extents = (param.minimum, param.maximum)
-        return extents if extents != param.declared_extents else None
-
     def reload_pedalboard(self, bundle):
         # find the current pedalboard object associated with that bundle
         old = self.pedalboards[bundle]
@@ -1342,6 +1337,7 @@ class Modhandler(Handler):
         for blend_mode in self.blend_modes.values():
             blend_mode.cleanup()
         self.blend_modes, self.active_blend_mode = {}, None
+        board.transport_plugin = board._build_transport_plugin(None)
         self.bind_current_pedalboard()
         self.lcd.draw_main_panel()
 
@@ -1353,16 +1349,17 @@ class Modhandler(Handler):
                 continue
             old.set_bypass(new.is_bypassed())
             for symbol, param in new.parameters.items():
-                if symbol == BYPASS_SYMBOL:
-                    continue
                 target = old.parameters.get(symbol)
                 if target is None:
                     continue
-                old.set_param_value(symbol, param.value)
-                if (param.binding, param.minimum, param.maximum) != (target.binding, target.minimum, target.maximum):
-                    self._apply_midi_binding(
-                        old.instance_id, symbol, param.binding or "-1:-1", self._binding_range_of(param)
-                    )
+                if symbol != BYPASS_SYMBOL:
+                    old.set_param_value(symbol, param.value)
+                if (param.binding, param.minimum, param.maximum) == (target.binding, target.minimum, target.maximum):
+                    continue
+                if param.binding is None:
+                    self._apply_midi_binding(old.instance_id, symbol, "-1:-1")
+                else:
+                    self._apply_midi_binding(old.instance_id, symbol, param.binding, (param.minimum, param.maximum))
             if new.customization.extra_data != old.customization.extra_data:
                 old.customization = replace(old.customization, extra_data=new.customization.extra_data)
             old.pedalboard_snapshot = dict(new.pedalboard_snapshot)
