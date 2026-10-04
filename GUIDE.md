@@ -120,8 +120,8 @@ uv-managed venv. Don't try to pip-install the system ones.
   it.** Both come from mod-ui in pairs, from a board load and a connect dump alike. Nothing
   else may raise `_is_pedalboard_loading` — an unclosed window silently refuses every send
   for the rest of the session, and `commit` then rolls each edit back on screen.
-  `set_current_pedalboard` also clears it, covering the aborted load that returns before
-  `loading_end`.
+  `install_board` also clears it, and the `BoardSync` BUILDING watchdog (30 s) clears it via
+  `abort_window` for an aborted load that never sends `loading_end`.
 
 - **Send form and echo form differ.** We send `param_set /graph/{id}/{sym} {v}`; both broadcast paths come back as `param_set /graph/{id} {sym} {v:%f}`
 
