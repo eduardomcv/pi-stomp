@@ -10,7 +10,7 @@ import pytest
 
 from common.parameter import BYPASS_SYMBOL, Symbol
 from modalapi.board_spec import BoardBuilder, BoardSpec, MidiMapSpec, PluginSpec
-from modalapi.ws_protocol import CONNECTED_MARKER, UnknownMessage, parse_message
+from modalapi.ws_protocol import CONNECTED_MARKER, LoadingEndMessage, LoadingStartMessage, UnknownMessage, parse_message
 from tests.replay_helpers import REPLAY_DIR, feed, load_replay, spec_of
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -320,3 +320,12 @@ def test_device_capture_builds_every_plugin_of_its_last_window(name: str):
     last_start = max(i for i, line in enumerate(lines) if line.startswith("loading_start"))
     added = [line.split(" ", 2)[1].removeprefix("/graph/") for line in lines[last_start:] if line.startswith("add ")]
     assert list(_replayed(name).plugins) == added
+
+
+def test_start_forgets_the_previous_windows_title_and_snapshot():
+    builder = BoardBuilder()
+    builder.start(LoadingStartMessage(empty=False, modified=False))
+    builder.end(LoadingEndMessage(snapshot_id=3, title="Old"))
+    builder.start(LoadingStartMessage(empty=False, modified=True))
+    spec = builder.freeze()
+    assert (spec.title, spec.snapshot_id, spec.modified) == ("", 0, True)

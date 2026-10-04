@@ -565,3 +565,23 @@ def test_coalesce_never_touches_non_param_sets():
         parse_message("param_set /graph/amp :bypass 0.0"),
     ]
     assert coalesce_param_sets(msgs) == msgs
+
+
+def test_coalesce_does_not_merge_across_a_loading_start():
+    before = ParamSetMessage(instance="A", symbol=Symbol("gain"), value=0.1)
+    window_start = LoadingStartMessage(empty=False, modified=False)
+    inside = ParamSetMessage(instance="A", symbol=Symbol("gain"), value=0.9)
+    assert coalesce_param_sets([before, window_start, inside]) == [before, window_start, inside]
+
+
+def test_coalesce_does_not_merge_across_a_reset():
+    before = ParamSetMessage(instance="A", symbol=Symbol("gain"), value=0.1)
+    after = ParamSetMessage(instance="A", symbol=Symbol("gain"), value=0.9)
+    assert coalesce_param_sets([before, ResetMessage(), after]) == [before, ResetMessage(), after]
+
+
+def test_coalesce_still_merges_within_a_segment():
+    first = ParamSetMessage(instance="A", symbol=Symbol("gain"), value=0.1)
+    last = ParamSetMessage(instance="A", symbol=Symbol("gain"), value=0.9)
+    start = LoadingStartMessage(empty=False, modified=False)
+    assert coalesce_param_sets([first, start, first, last]) == [first, start, last]

@@ -433,13 +433,20 @@ def parse_message(raw_message: str) -> WebSocketMessage:
 def coalesce_param_sets(messages: list[WebSocketMessage]) -> list[WebSocketMessage]:
     """Drop every param_set but the last per (instance, symbol), keeping each
     survivor at its original position. The port is level-sampled and the feed
-    is in-order, so intermediate values of one drain are paint-only."""
-    latest: dict[tuple[str, Symbol], int] = {}
+    is in-order, so intermediate values of one drain are paint-only. A
+    loading_start or reset begins a new board, so values never merge across one."""
+    segment = 0
+    keys: list[tuple[int, str, Symbol] | None] = []
+    latest: dict[tuple[int, str, Symbol], int] = {}
     for i, msg in enumerate(messages):
+        if isinstance(msg, (LoadingStartMessage, ResetMessage)):
+            segment += 1
         if isinstance(msg, ParamSetMessage):
-            latest[(msg.instance, msg.symbol)] = i
+            key = (segment, msg.instance, msg.symbol)
+            latest[key] = i
+            keys.append(key)
+        else:
+            keys.append(None)
     if not latest:
         return messages
-    return [
-        m for i, m in enumerate(messages) if not isinstance(m, ParamSetMessage) or latest[(m.instance, m.symbol)] == i
-    ]
+    return [m for i, (m, key) in enumerate(zip(messages, keys, strict=True)) if key is None or latest[key] == i]

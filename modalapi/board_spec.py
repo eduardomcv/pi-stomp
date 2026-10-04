@@ -150,6 +150,7 @@ class BoardBuilder:
         self._clear()
         self._empty = msg.empty
         self._modified = msg.modified
+        self._snapshot_id, self._title = 0, ""
 
     def end(self, msg: LoadingEndMessage) -> None:
         self._snapshot_id = msg.snapshot_id
