@@ -229,8 +229,6 @@ class BoardSync:
         spec = self._builder.freeze()
         host = self._host
         host.plugin_dict.update(result.metadata)
-        if result.boards is not None:
-            host.update_board_list(result.boards)
         bundle = result.bundle if result.bundle_known else None
         presets = dict(result.snapshots) if result.snapshots else dict(_DEFAULT_PRESETS)
         index = max(0, spec.snapshot_id)
@@ -247,12 +245,16 @@ class BoardSync:
             if plugin is not None and plugin.customization.extra_data is None:
                 plugin.customization = replace(plugin.customization, extra_data=extra)
         current = host.current_board()
-        if current is not None and current.bundle == candidate.bundle and same_structure(current, candidate):
-            host.reconcile_board(candidate, presets, index)
-        else:
-            host.install_board(candidate, presets, index, sync_blend=self._sync_blend(spec, bundle))
+        in_place = current is not None and current.bundle == candidate.bundle and same_structure(current, candidate)
+        sync_blend = self._sync_blend(spec, bundle)
         self._state = SyncState.IDLE
         self.applied += 1
+        if result.boards is not None:
+            host.update_board_list(result.boards)
+        if in_place:
+            host.reconcile_board(candidate, presets, index)
+        else:
+            host.install_board(candidate, presets, index, sync_blend=sync_blend)
 
     def _sync_blend(self, spec: BoardSpec, bundle: str | None) -> bool:
         return bundle is not None and (self._kind is WindowKind.LOAD or not spec.modified)

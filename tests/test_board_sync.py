@@ -12,7 +12,7 @@ from modalapi.pedalboard import Pedalboard
 from modalapi.plugin import Plugin
 from modalapi.plugin_customization import Customizer, PatchParser, PluginExtraData, default_customizer
 from modalapi.ws_protocol import parse_message
-from tests.replay_helpers import load_plugin_info, load_replay
+from tests.replay_helpers import load_plugin_info, load_replay, spec_of
 
 BUNDLE = "/data/.pedalboards/Rig.pedalboard"
 
@@ -39,6 +39,9 @@ class FakeHost:
         found = self.installed.find_plugin(instance)
         assert found is not None
         return found
+
+    def plugin_transport_bpm(self) -> float:
+        return self.installed.transport_plugin.parameters[Symbol(":bpm")].value
 
     def current_board(self) -> Pedalboard | None:
         return self.board
@@ -258,13 +261,37 @@ def test_a_changed_structure_swaps():
     assert host.kinds()[-1] == "install"
 
 
-def test_same_structure_compares_order_uris_and_connections():
-    host = FakeHost()
-    sync = BoardSync(host, Clock())
-    sync.on_resolved(_resolved(_window(sync, host).ticket))
-    a = host.installed
-    assert same_structure(a, a)
-    assert not same_structure(a, Pedalboard.empty())
+def _board_from(lines: list[str]) -> Pedalboard:
+    return Pedalboard.from_spec(
+        spec_of(*lines), load_plugin_info(), BUNDLE, "Rig", None, default_customizer, _patch_none
+    )
+
+
+def _saved_with(drop: str | None = None, swap: tuple[str, str] | None = None) -> list[str]:
+    lines = [line for line in load_replay("connect_dump_saved.txt") if line != drop]
+    if swap is not None:
+        lines = [line.replace(*swap) for line in lines]
+    return lines
+
+
+def test_same_structure_is_true_for_an_identical_copy():
+    assert same_structure(_board_from(_saved_with()), _board_from(_saved_with()))
+
+
+def test_same_structure_sees_a_dropped_connection():
+    dropped = "connect /graph/drive/out /graph/neural_amp_modeler_lv2_1/input"
+    assert not same_structure(_board_from(_saved_with()), _board_from(_saved_with(drop=dropped)))
+
+
+def test_same_structure_sees_plugin_order():
+    swapped = _saved_with(
+        swap=("drive http://example.com/fixture/drive 200.0", "drive http://example.com/fixture/drive 2000.0")
+    )
+    assert not same_structure(_board_from(_saved_with()), _board_from(swapped))
+
+
+def test_same_structure_sees_a_different_plugin_set():
+    assert not same_structure(_board_from(_saved_with()), Pedalboard.empty())
 
 
 def test_reset_outside_a_window_clears_in_place_and_is_consumed():
@@ -300,13 +327,22 @@ def test_a_snapshot_message_while_idle_is_the_handlers():
     assert _feed(sync, ["pedal_snapshot 1 Lead"]) == [False]
 
 
+@pytest.mark.parametrize(("dump", "bpm"), [("connect_dump_saved.txt", 120.0), ("connect_dump_unsaved.txt", 96.0)])
+def test_a_transport_before_loading_start_survives_the_window(dump, bpm):
+    host = FakeHost()
+    sync = BoardSync(host, Clock())
+    job = _window(sync, host, dump)
+    sync.on_resolved(_resolved(job.ticket))
+    assert host.plugin_transport_bpm() == pytest.approx(bpm)
+
+
 def test_the_latest_transport_feeds_the_new_board():
     host = FakeHost()
     sync = BoardSync(host, Clock())
     job = _window(sync, host)
     _feed(sync, ["transport 1 4.000000 96.000000 none"])
     sync.on_resolved(_resolved(job.ticket))
-    assert host.installed.transport_plugin.parameters[Symbol(":bpm")].value == pytest.approx(96.0)
+    assert host.plugin_transport_bpm() == pytest.approx(96.0)
 
 
 @dataclass(frozen=True)
@@ -398,6 +434,22 @@ def test_rebase_is_ignored_during_a_window_and_deduplicated_while_in_flight():
     assert host2.kinds().count("request") == 1
 
 
+def test_a_rebase_requested_while_one_is_in_flight_runs_again_after_it():
+    host = FakeHost()
+    sync = BoardSync(host, Clock())
+    sync.request_rebase()
+    sync.request_rebase()
+    first = host.calls[-1][1]
+    sync.on_resolved(_resolved(first.ticket))
+    assert host.kinds() == ["request", "rebase", "request"]
+    second = host.calls[-1][1]
+    assert second.ticket != first.ticket
+    sync.on_resolved(_resolved(second.ticket))
+    assert host.kinds() == ["request", "rebase", "request", "rebase"]
+    sync.request_rebase()
+    assert host.kinds().count("request") == 3
+
+
 def test_a_window_cancels_a_rebase_in_flight():
     host = FakeHost()
     sync = BoardSync(host, Clock())
@@ -406,6 +458,23 @@ def test_a_window_cancels_a_rebase_in_flight():
     _feed(sync, ["loading_start 0 0"])
     sync.on_resolved(_resolved(rebase.ticket))
     assert "rebase" not in host.kinds()
+
+
+class _RaisingInstallHost(FakeHost):
+    def install_board(self, board: Pedalboard, presets: dict[int, str], preset_index: int, *, sync_blend: bool) -> None:
+        raise RuntimeError("host failed")
+
+
+def test_a_host_that_raises_on_install_does_not_leave_the_machine_resolving():
+    clock, host = Clock(), _RaisingInstallHost()
+    sync = BoardSync(host, clock)
+    job = _window(sync, host)
+    with pytest.raises(RuntimeError):
+        sync.on_resolved(_resolved(job.ticket))
+    assert sync.state is SyncState.IDLE
+    clock.now = 31.0
+    sync.poll()
+    assert _feed(sync, ["param_set /graph/drive gain 0.700000"]) == [False]
 
 
 def test_board_sync_imports_neither_the_handler_nor_the_plugins_package():
