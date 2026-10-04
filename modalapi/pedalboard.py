@@ -269,7 +269,9 @@ class Pedalboard:
             return self.transport_plugin
         return None
 
-    def _build_plugin(self, instance_id: str, uri: str, x: float, y: float, info: dict) -> Plugin.Plugin:
+    def _build_plugin(
+        self, instance_id: str, uri: str, x: float, y: float, info: dict, instance_number: int | None = None
+    ) -> Plugin.Plugin:
         """Build a Plugin from REST metadata (no LILV). Used for dynamic adds.
 
         Parameters start at REST defaults; bypass is set false. MIDI bindings
@@ -293,11 +295,15 @@ class Pedalboard:
                 pp, float(default_val) if default_val is not None else 0.0, None, instance_id
             )
 
-        # TODO: extra_data can't be populated here — mod-ui's `add` WS message
-        # doesn't include the numeric `pedal:instanceNumber`, so we can't address
-        # effect-N/effect.ttl. A protocol change (include the instance number
-        # on the wire) would let us pass the bundle + number to the customizer.
-        inst = Plugin.Plugin(instance_id, parameters, info or None, category, uri=uri, customization=self._customizer(uri))
+        inst = Plugin.Plugin(
+            instance_id,
+            parameters,
+            info or None,
+            category,
+            uri=uri,
+            customization=self._customizer(uri),
+            instance_number=instance_number,
+        )
         inst.canvas_x = x
         inst.canvas_y = y
         return inst

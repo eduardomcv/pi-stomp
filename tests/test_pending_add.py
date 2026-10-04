@@ -1,5 +1,7 @@
+import dataclasses
 import subprocess
 import sys
+from typing import Literal, get_args, get_origin
 
 import pytest
 
@@ -13,7 +15,9 @@ from modalapi.ws_protocol import (
     ParamSetMessage,
     PatchSetMessage,
     PluginBypassMessage,
+    PluginPosMessage,
     RemovePluginMessage,
+    WebSocketMessage,
 )
 
 DRIVE = "http://example.com/drive"
@@ -43,6 +47,7 @@ def connect(src: str, dst: str) -> ConnectMessage:
         ),
         (PatchSetMessage(instance="A", param_uri="http://p", value_type="s", value="x y"), ("A",)),
         (RemovePluginMessage(instance="A"), ("A",)),
+        (PluginPosMessage(instance="A", x=1.0, y=2.0), ("A",)),
         (connect("A", "B"), ("A", "B")),
         (DisconnectMessage(port_from="/graph/capture_1", port_to="/graph/A/in_L"), ("capture_1", "A")),
         (add("A"), ()),
@@ -162,3 +167,47 @@ def test_pending_add_imports_only_the_protocol():
         "sys.exit(1 if bad else 0)"
     )
     assert subprocess.run([sys.executable, "-c", code], check=False).returncode == 0
+
+
+def _sample_value(name: str, annotation: object) -> object:
+    if name in {"port_from", "port_to"}:
+        return "/graph/a/out"
+    if name == "instance":
+        return "a"
+    if annotation is Symbol:
+        return Symbol("x")
+    if get_origin(annotation) is Literal:
+        return get_args(annotation)[0]
+    if annotation is str:
+        return ""
+    if annotation is bool:
+        return False
+    if annotation is float:
+        return 0.0
+    return 0
+
+
+def _sample(cls: type) -> WebSocketMessage:
+    kwargs = {f.name: _sample_value(f.name, f.type) for f in dataclasses.fields(cls) if f.init}
+    return cls(**kwargs)
+
+
+def test_a_plugin_pos_for_a_pending_instance_is_parked():
+    pending = PendingAdds()
+    pending.start(add("A"))
+    msg = PluginPosMessage(instance="A", x=5.0, y=6.0)
+    assert pending.defer(msg) is True
+    [resolved] = pending.resolve([DRIVE])
+    assert resolved.buffered == [msg]
+
+
+def test_instances_of_covers_every_message_that_names_a_plugin():
+    named = {"instance", "port_from", "port_to"}
+    checked = 0
+    for cls in get_args(WebSocketMessage):
+        if cls is AddPluginMessage:
+            continue
+        if {f.name for f in dataclasses.fields(cls)} & named:
+            assert instances_of(_sample(cls)) != (), f"{cls.__name__} names a plugin but instances_of ignores it"
+            checked += 1
+    assert checked >= 8

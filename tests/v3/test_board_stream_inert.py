@@ -1,6 +1,6 @@
-"""Outside a window, a lone connect marker only arms the next window and `plugin_pos` is
-not acted on yet: the board, the screen and the outbound queue stay as they were.
-`remove :all` outside a window is the one stream message that changes the board."""
+"""Outside a window, a lone connect marker only arms the next window: the board, the
+screen and the outbound queue stay as they were. `remove :all` outside a window changes
+the board; `plugin_pos` is covered by test_plugin_pos."""
 
 from modalapi.board_sync import UNTITLED, SyncState
 from modalapi.connections import Connection, Endpoint, EndpointKind
@@ -27,14 +27,12 @@ def test_v3_board_stream_messages_are_inert(v3_system: SystemFixture, make_plugi
     handler.lcd.draw_main_panel()
     snapshot("board")
 
-    for raw in (CONNECTED_MARKER, "plugin_pos /graph/drive 900 40"):
-        ws_bridge.inject(raw)
+    ws_bridge.inject(CONNECTED_MARKER)
     handler.poll_ws_messages()
 
     assert handler._board_sync.state is SyncState.IDLE
     assert handler.current.pedalboard.plugins == [drive, delay]
     assert handler.current.pedalboard.connections == [_edge("drive", "delay")]
-    assert (drive.canvas_x, drive.canvas_y) == (0.0, 0.0)
     assert not handler._is_pedalboard_loading
     assert ws_bridge.sent == []
     handler.lcd.draw_main_panel()

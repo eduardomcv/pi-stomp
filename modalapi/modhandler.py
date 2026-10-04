@@ -93,6 +93,7 @@ from modalapi.ws_protocol import (
     LoadingStartMessage,
     PedalSnapshotMessage,
     PluginBypassMessage,
+    PluginPosMessage,
     TransportMessage,
     AddPluginMessage,
     PatchSetMessage,
@@ -846,6 +847,9 @@ class Modhandler(Handler):
                 else:
                     logging.debug(f"WebSocket: remove {msg.instance} — not found in model")
 
+        elif isinstance(msg, PluginPosMessage):
+            self._handle_plugin_pos(msg)
+
         elif isinstance(msg, ConnectMessage):
             if self._is_pedalboard_loading:
                 logging.debug(f"WebSocket: connect {msg.port_from} -> {msg.port_to} during load — suppressed")
@@ -909,6 +913,21 @@ class Modhandler(Handler):
         elif isinstance(msg, PatchSetMessage):
             self._handle_patch_set(msg)
 
+    def _handle_plugin_pos(self, msg: PluginPosMessage) -> None:
+        if self._current is None:
+            return
+        board = self.current.pedalboard
+        plugin = board.find_plugin(msg.instance)
+        if plugin is None:
+            return
+        plugin.canvas_x, plugin.canvas_y = msg.x, msg.y
+        before = [p.instance_id for p in board.plugins]
+        board.plugins.sort(key=lambda p: (p.canvas_x, p.canvas_y, p.instance_id))
+        # Only plugin order reaches the layout and the controller binding; a move that keeps it needs no redraw.
+        if [p.instance_id for p in board.plugins] != before:
+            self.bind_current_pedalboard()
+            self.lcd.draw_main_panel()
+
     @staticmethod
     def _apply_patch(plugin: Plugin, param_uri: str, value: str) -> bool:
         """Refresh one plugin's extra_data. False if nothing owns this property
@@ -946,7 +965,7 @@ class Modhandler(Handler):
 
     def _insert_plugin(self, msg: AddPluginMessage, info: dict) -> None:
         board = self.current.pedalboard
-        plugin = board._build_plugin(msg.instance, msg.uri, msg.x, msg.y, info)
+        plugin = board._build_plugin(msg.instance, msg.uri, msg.x, msg.y, info, instance_number=msg.instance_number)
         plugin.set_bypass(msg.bypassed)
         keys = [p.canvas_x for p in board.plugins]
         board.plugins.insert(bisect.bisect_left(keys, plugin.canvas_x), plugin)

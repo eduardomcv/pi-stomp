@@ -35,6 +35,7 @@ from modalapi.ws_protocol import (
     ParamSetMessage,
     PatchSetMessage,
     PluginBypassMessage,
+    PluginPosMessage,
     RemovePluginMessage,
     WebSocketMessage,
 )
@@ -45,7 +46,10 @@ def _port_instance(port: str) -> str:
 
 
 def instances_of(msg: WebSocketMessage) -> tuple[str, ...]:
-    if isinstance(msg, (ParamSetMessage, PluginBypassMessage, MidiMapMessage, PatchSetMessage, RemovePluginMessage)):
+    if isinstance(
+        msg,
+        (ParamSetMessage, PluginBypassMessage, MidiMapMessage, PatchSetMessage, RemovePluginMessage, PluginPosMessage),
+    ):
         return (msg.instance,)
     if isinstance(msg, (ConnectMessage, DisconnectMessage)):
         return (_port_instance(msg.port_from), _port_instance(msg.port_to))
