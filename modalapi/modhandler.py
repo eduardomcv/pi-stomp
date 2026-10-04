@@ -1270,7 +1270,13 @@ class Modhandler(Handler):
                 renamed = True
             old.pedalboard_snapshot = dict(new.pedalboard_snapshot)
         live.title = candidate.title
+        moved = preset_index != self.current.preset_index
         self.current.presets, self.current.preset_index = dict(presets), preset_index
+        if moved:
+            try:
+                self._handle_blend_mode_snapshot_change(preset_index)
+            except Exception as e:
+                logging.error(f"Blend mode update on reconcile failed: {e}")
         # Tiles follow bypass and values themselves; a full redraw would move the selection to the wrench.
         if renamed:
             self.lcd.draw_main_panel()

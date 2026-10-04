@@ -226,6 +226,7 @@ class BoardSync:
         self._host.request_board(BoardJob(self._ticket, tuple(uris), self._host.known_bundles(), targets))
 
     def _complete(self, result: BoardResolved) -> None:
+        self._state = SyncState.IDLE
         spec = self._builder.freeze()
         host = self._host
         host.plugin_dict.update(result.metadata)
@@ -247,7 +248,6 @@ class BoardSync:
         current = host.current_board()
         in_place = current is not None and current.bundle == candidate.bundle and same_structure(current, candidate)
         sync_blend = self._sync_blend(spec, bundle)
-        self._state = SyncState.IDLE
         self.applied += 1
         if result.boards is not None:
             host.update_board_list(result.boards)

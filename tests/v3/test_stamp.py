@@ -105,26 +105,39 @@ class TestStampOnPedalboardChange:
         _assert_stamp_not_called(mock_run)
 
 
-class TestNoStampOnSetCurrentPedalboard:
-    """pistomp-stamp stamp must NOT be called when set_current_pedalboard()
-    is called directly."""
+class TestStampOnSetCurrentPedalboard:
+    """set_current_pedalboard stamps only when it replaces a board with a
+    different bundle; never at startup, never for the bundle already current."""
 
-    def test_no_stamp_on_direct_set(self, v3_system: SystemFixture):
+    def test_no_stamp_on_the_same_bundle(self, v3_system: SystemFixture):
         handler = v3_system.handler
         pb = handler.pedalboards["/path/to/rig.pedalboard"]
         with patch("modalapi.modhandler.subprocess.Popen") as mock_run:
             handler.set_current_pedalboard(pb)
         _assert_stamp_not_called(mock_run)
 
+    def test_no_stamp_at_startup(self, v3_system: SystemFixture):
+        handler = v3_system.handler
+        handler._current = None
+        with patch("modalapi.modhandler.subprocess.Popen") as mock_run:
+            handler.set_current_pedalboard(handler.pedalboards[NEW])
+        _assert_stamp_not_called(mock_run)
+
+    def test_stamp_on_a_different_bundle_after_startup(self, v3_system: SystemFixture):
+        handler = v3_system.handler
+        with patch("modalapi.modhandler.subprocess.Popen") as mock_run:
+            handler.set_current_pedalboard(handler.pedalboards[NEW])
+        _assert_stamp_called(mock_run, times=1)
+
+
+class TestStampNotCalledOnNonChangeOperations:
+    """Operations that don't change the pedalboard must not trigger a stamp."""
+
     def test_no_stamp_on_load_pedalboards(self, v3_system: SystemFixture):
         handler = v3_system.handler
         with patch("modalapi.modhandler.subprocess.Popen") as mock_run:
             handler.load_pedalboards()
         _assert_stamp_not_called(mock_run)
-
-
-class TestStampNotCalledOnNonChangeOperations:
-    """Operations that don't change the pedalboard must not trigger a stamp."""
 
     def test_no_stamp_on_preset_change(self, v3_system: SystemFixture):
         handler = v3_system.handler

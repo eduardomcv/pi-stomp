@@ -17,7 +17,9 @@ from modalapi.plugin import Plugin
 from pistomp.controller import ControlType
 from pistomp.config.adapt_v1 import adapt
 from pistomp.config.schema_v1 import merge
+from modalapi.board_sync import SyncState
 from tests.board_window import play_window, serve_board
+from tests.fake_board_fetcher import FakeBoardFetcher
 from tests.types import SystemFixture
 from modalapi.connections import Connection, Endpoint, EndpointKind
 from modalapi.ws_protocol import CONNECTED_MARKER
@@ -621,6 +623,8 @@ def test_v3_reconnect_after_board_change_same_tick_applies_dump(v3_system: Syste
     live state (delay bypassed at snapshot 1) is what B shows, and the last.json
     refresh that follows does not undo it."""
     handler = v3_system.handler
+    fetcher = handler.board_fetcher
+    assert isinstance(fetcher, FakeBoardFetcher)
     serve_board(v3_system, bundle="/path/to/new.pedalboard", snapshots={"0": "Default", "1": "Lead"})
 
     ws_bridge = v3_system.ws_bridge
@@ -643,6 +647,10 @@ def test_v3_reconnect_after_board_change_same_tick_applies_dump(v3_system: Syste
     delay = board.find_plugin("delay")
     assert delay is not None and delay.is_bypassed()  # the live snapshot; lost to .ttl default on clean core
     assert handler.current.preset_index == 1
+    window_job, rebase_job = fetcher.board_jobs
+    assert window_job.uris and rebase_job.uris == ()
+    assert handler._board_sync.state is SyncState.IDLE
+    assert board.find_plugin("delay") is delay
 
 
 def test_v3_inbound_param_set_refreshes_cached_value(v3_system: SystemFixture, make_plugin, make_parameter):

@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import common.token as Token
 from modalapi.pedalboard import Pedalboard
@@ -114,8 +115,39 @@ def test_v3_refetch_for_unknown_bundle_does_not_duplicate_list(v3_system: System
     assert len(handler.pedalboards) == 3
 
 
+def _list_side_effect(boards: list[tuple[str, str]]):
+    """mock_get side effect where pedalboard/list returns exactly `boards` as (title, bundle)."""
+
+    def side_effect(url, **_kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "pedalboard/list" in url:
+            resp.text = json.dumps([{"title": t, "bundle": b} for t, b in boards])
+        else:
+            resp.text = "{}"
+        return resp
+
+    return side_effect
+
+
 def test_v3_refetch_drops_boards_modui_no_longer_lists(v3_system: SystemFixture):
     """A board deleted in MOD-UI leaves both the dict and the nav list on refetch."""
+    handler = v3_system.handler
+
+    v3_system.mock_get.side_effect = _list_side_effect(
+        [
+            ("Integration Rig", "/path/to/rig.pedalboard"),
+        ]
+    )
+
+    handler.load_pedalboards()
+
+    assert "/path/to/new.pedalboard" not in handler.pedalboards
+    assert [pb.bundle for pb in handler.pedalboard_list] == ["/path/to/rig.pedalboard"]
+
+
+def test_v3_update_board_list_drops_boards_modui_no_longer_lists(v3_system: SystemFixture):
+    """The list a board window's resolution brings back replaces ours the same way."""
     handler = v3_system.handler
 
     handler.update_board_list((("Integration Rig", "/path/to/rig.pedalboard"),))

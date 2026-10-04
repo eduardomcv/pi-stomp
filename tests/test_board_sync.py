@@ -477,6 +477,23 @@ def test_a_host_that_raises_on_install_does_not_leave_the_machine_resolving():
     assert _feed(sync, ["param_set /graph/drive gain 0.700000"]) == [False]
 
 
+def test_a_board_that_fails_to_build_does_not_leave_the_machine_resolving(monkeypatch):
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("from_spec failed")
+
+    monkeypatch.setattr(Pedalboard, "from_spec", broken)
+    clock, host = Clock(), FakeHost()
+    sync = BoardSync(host, clock)
+    job = _window(sync, host)
+    with pytest.raises(RuntimeError):
+        sync.on_resolved(_resolved(job.ticket))
+    assert sync.state is SyncState.IDLE
+    assert sync.applied == 0
+    clock.now = 61.0
+    sync.poll()
+    assert _feed(sync, ["param_set /graph/drive gain 0.700000"]) == [False]
+
+
 def test_board_sync_imports_neither_the_handler_nor_the_plugins_package():
     code = (
         "import sys, modalapi.board_sync;"

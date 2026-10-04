@@ -1,5 +1,6 @@
 from modalapi.board_sync import SyncState
 from modalapi.connections import Connection, Endpoint, EndpointKind
+from modalapi.pedalboard import Pedalboard
 from modalapi.ws_protocol import CONNECTED_MARKER
 from tests.board_window import play_window, serve_board
 from tests.fake_board_fetcher import FakeBoardFetcher
@@ -142,3 +143,69 @@ def test_a_raising_board_sync_step_is_logged_and_the_loop_carries_on(v3_system, 
     v3_system.ws_bridge.inject("param_set /graph/fuzz :bypass 1.0")
     handler.poll_ws_messages()
     assert plugin.is_bypassed()
+
+
+def test_a_board_that_fails_to_build_is_logged_once_and_live_echoes_still_land(
+    v3_system, make_plugin, monkeypatch, caplog
+):
+    handler = v3_system.handler
+    plugin = make_plugin("fuzz", bypassed=False)
+    handler.current.pedalboard.plugins = [plugin]
+    now = [0.0]
+    handler._board_sync._clock = lambda: now[0]
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("from_spec failed")
+
+    monkeypatch.setattr(Pedalboard, "from_spec", broken)
+    serve_board(v3_system, bundle="/path/to/new.pedalboard")
+    play_window(v3_system, ["loading_start 0 0", "loading_end 0 New Rig"])
+    now[0] = 61.0
+    handler.poll_ws_messages()
+    handler.poll_ws_messages()
+
+    assert caplog.text.count("board sync step failed") == 1
+    v3_system.ws_bridge.inject("param_set /graph/fuzz :bypass 1.0")
+    handler.poll_ws_messages()
+    assert plugin.is_bypassed()
+
+
+def _same_blend_board_window(system, snapshot_id: int) -> list[str]:
+    board = system.handler.current.pedalboard
+    serve_board(system, bundle=board.bundle, snapshots={"0": "Clean", "1": "Lead", "2": "Blend"})
+    return [CONNECTED_MARKER, *board_to_replay_lines(board, False, False, snapshot_id)]
+
+
+def _with_uris(system) -> None:
+    for plugin in system.handler.current.pedalboard.plugins:
+        plugin.uri = f"urn:pistomp:test:{plugin.instance_id}"
+
+
+def test_a_reconciled_snapshot_index_leaves_the_blend_mode(blend_system):
+    handler = blend_system.handler
+    _with_uris(blend_system)
+    plugins = list(handler.current.pedalboard.plugins)
+    assert handler.active_blend_mode is not None
+    assert handler.current.preset_index == 2
+
+    play_window(blend_system, _same_blend_board_window(blend_system, 0))
+
+    assert handler.current.pedalboard.plugins == plugins
+    assert handler.current.preset_index == 0
+    assert handler.active_blend_mode is None
+
+
+def test_a_reconciled_unchanged_index_keeps_the_blend_mode(blend_system, monkeypatch):
+    handler = blend_system.handler
+    _with_uris(blend_system)
+    active = handler.active_blend_mode
+    assert active is not None
+    toggles = []
+    monkeypatch.setattr(active, "deactivate", lambda: toggles.append("deactivate"))
+    monkeypatch.setattr(active, "activate", lambda: toggles.append("activate"))
+
+    play_window(blend_system, _same_blend_board_window(blend_system, 2))
+
+    assert handler.current.preset_index == 2
+    assert handler.active_blend_mode is active
+    assert toggles == []
