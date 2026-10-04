@@ -34,7 +34,7 @@ _CONFIG_TEMPLATES = {
 }
 
 
-def bootstrap_emulator(version: EmulatorVersion, cwd: str):
+def bootstrap_emulator(version: EmulatorVersion, cwd: str, initial_board_timeout_s: float = 5.0):
     """Initialize pygame, build the emulator handler/hardware, and return (handler, midiout)."""
     from uilib.pygame_init import init as pygame_init
     from emulator.window import EmulatorWindow
@@ -74,15 +74,7 @@ def bootstrap_emulator(version: EmulatorVersion, cwd: str):
     handler.load_banks()
     handler.load_pedalboards()
 
-    current_bundle = handler.get_current_pedalboard_bundle_path()
-    if current_bundle and current_bundle in handler.pedalboards:
-        handler.set_current_pedalboard(handler.pedalboards[current_bundle])
-    elif handler.pedalboard_list:
-        from modalapi.pedalboard_monitor import write_last_json
-        pb = handler.pedalboard_list[0]
-        write_last_json(handler.last_json_monitor.path, pb.bundle)
-        handler.pedalboard_change(pb)
-        handler.set_current_pedalboard(pb)
+    handler.await_initial_board(timeout_s=initial_board_timeout_s)
 
     handler.system_info_load()
     handler.software_version = "Emulator"

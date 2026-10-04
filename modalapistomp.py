@@ -36,8 +36,6 @@ import time
 
 from rtmidi.midiutil import open_midioutput
 
-from modalapi.pedalboard_monitor import write_last_json
-
 from pistomp.audiocard import Audiocard
 import pistomp.audiocardfactory as Audiocardfactory
 import pistomp.config as config
@@ -146,27 +144,7 @@ def main():
         handler.load_banks()
         handler.load_pedalboards()
 
-        # Load the current pedalboard as "current"
-        current_pedal_board_bundle = handler.get_current_pedalboard_bundle_path()
-        if current_pedal_board_bundle and current_pedal_board_bundle not in handler.pedalboards:
-            logging.warning(
-                "last.json points to unknown pedalboard '%s' (deleted or renamed?); "
-                "falling back to first known pedalboard",
-                current_pedal_board_bundle,
-            )
-            current_pedal_board_bundle = None
-        if not current_pedal_board_bundle:
-            # last.json missing/malformed, or points to a pedalboard that no longer exists
-            if not handler.pedalboard_list:
-                logging.error("No pedalboards found; cannot recover from missing/malformed last.json")
-                sys.exit(1)
-            pb = handler.pedalboard_list[0]
-            write_last_json(handler.last_json_monitor.path, pb.bundle)
-            handler.last_json_monitor.reset()
-            handler.pedalboard_change(pb)
-            handler.set_current_pedalboard(pb)
-        else:
-            handler.set_current_pedalboard(handler.pedalboards[current_pedal_board_bundle])
+        handler.await_initial_board(timeout_s=5)
 
         # Load system info.  This can take a few seconds
         handler.system_info_load()

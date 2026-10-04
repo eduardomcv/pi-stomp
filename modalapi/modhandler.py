@@ -1112,6 +1112,26 @@ class Modhandler(Handler):
     def get_current_pedalboard_bundle_path(self):
         return read_pedalboard_bundle(self.last_json_monitor.path)
 
+    def await_initial_board(
+        self,
+        timeout_s: float = 5.0,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Show the board mod-ui holds as soon as its stream says so, else an empty one.
+        mod-ui's connect dump is already queued by the time hardware and the board
+        list are up, so this normally returns on the first pump."""
+        deadline = clock() + timeout_s
+        while self._board_sync.applied == 0 and clock() < deadline:
+            self.poll_ws_messages()
+            if self._board_sync.applied:
+                break
+            sleep(0.01)
+        if self._current is None:
+            logging.warning("no board stream from mod-ui within %.1fs; starting empty", timeout_s)
+            self.set_current_pedalboard(Pedalboard.Pedalboard.empty(self.customizer))
+
     def set_current_pedalboard(self, pedalboard):
         pedalboard.hydrate(self.plugin_dict)  # removed in Task 7
         self.install_board(pedalboard, {0: "Default"}, 0, sync_blend=True)

@@ -7,7 +7,6 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 import common.token as Token
-from modalapi.pedalboard_monitor import write_last_json
 from pistomp.config import parse
 
 with patch("pistomp.settings.Settings.load_settings"), patch("pistomp.settings.Settings.set_setting"):
@@ -52,7 +51,7 @@ def test_modhandler_init_propagates_ws_bridge_construction_failure(tmp_path):
 
 
 def test_missing_last_json_recovery(tmp_path):
-    """Missing last.json: startup writes it with the first pedalboard and sets handler.current."""
+    """No stream from mod-ui and no last.json: startup shows an empty board and writes nothing."""
     _reset_modhandler_singleton()
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -99,24 +98,16 @@ def test_missing_last_json_recovery(tmp_path):
         assert handler.get_current_pedalboard_bundle_path() is None
         assert handler.pedalboard_list
 
-        # Recovery sequence (mirrors modalapistomp.py startup branch)
-        pb = handler.pedalboard_list[0]
-        write_last_json(handler.last_json_monitor.path, pb.bundle)
-        handler.pedalboard_change(pb)
-        handler.set_current_pedalboard(pb)
+        ticks = iter([0.0, 0.0, 6.0, 6.0, 6.0])
+        handler.await_initial_board(timeout_s=5.0, sleep=lambda s: None, clock=lambda: next(ticks))
 
-        # last.json written with the first pedalboard
-        last = json.loads((data_dir / "last.json").read_text())
-        assert last["pedalboard"] == "/path/to/first.pedalboard"
-        assert last["bank"] == -2
-
-        # handler.current is set and points to the right pedalboard
         assert handler.current is not None
-        assert handler.current.pedalboard.bundle == "/path/to/first.pedalboard"
-
-        # mod-ui received a load_bundle POST for the first pedalboard
+        assert handler.current.pedalboard.title == ""
+        assert handler.current.pedalboard.bundle is None
+        assert handler.current.pedalboard.plugins == []
+        assert not (data_dir / "last.json").exists()
         post_urls = [c.args[0] for c in mock_post.call_args_list]
-        assert any("load_bundle" in u for u in post_urls)
+        assert not any("load_bundle" in u for u in post_urls)
 
 
 def _pedalboard_list_response():

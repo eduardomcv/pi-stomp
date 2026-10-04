@@ -81,9 +81,11 @@ def emulator_env(tmp_path, monkeypatch):
         mock_post = stack.enter_context(patch("pistomp.httpclient.post", side_effect=_mod_post))
         stack.enter_context(patch("modalapi.pedalboard.Pedalboard.hydrate"))
         stack.enter_context(patch("modalapi.modhandler.AsyncWebSocketBridge"))
-        stack.enter_context(patch("emulator.modhandler.AsyncWebSocketBridge"))
+        bridge_cls = stack.enter_context(patch("emulator.modhandler.AsyncWebSocketBridge"))
+        bridge = bridge_cls.return_value
+        bridge.get_received_messages.return_value = []
         # MIDI device may not exist on CI; force the bootstrap's except branch.
         stack.enter_context(patch("emulator.bootstrap.open_midioutput", side_effect=RuntimeError("no midi")))
-        yield {"get": mock_get, "post": mock_post, "tmp_path": tmp_path}
+        yield {"get": mock_get, "post": mock_post, "bridge": bridge, "tmp_path": tmp_path}
 
     _reset_singletons()
