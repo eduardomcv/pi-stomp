@@ -61,7 +61,7 @@ from common.contexts import (
 from common.parameter import BYPASS_SYMBOL, Parameter, PortInfo, Symbol
 from common.param_source import ParamSink
 from common.parameter_editing import EditContext, ParameterSteps, effective_multiplier
-from modalapi.board_fetch import BoardFetcher, MetadataFetched, MetadataFetcher
+from modalapi.board_fetch import BoardFetcher, Fetcher, MetadataFetched
 from modalapi.pending_add import PendingAdds
 from modalapi.plugin import Plugin
 from blend.input_controller import InputController
@@ -165,7 +165,7 @@ class Modhandler(Handler):
         self.pedalboards = {}
         self.pedalboard_list = []  # TODO LAME to have two lists
         self.plugin_dict = {}
-        self.board_fetcher: MetadataFetcher = BoardFetcher(self.root_uri)
+        self.board_fetcher: Fetcher = BoardFetcher(self.root_uri)
         self._pending_adds = PendingAdds()
 
         # Unbound encoders own no value; the handler (the emitter) keeps their
@@ -988,6 +988,8 @@ class Modhandler(Handler):
 
     def _drain_board_fetcher(self) -> None:
         for fetched in self.board_fetcher.drain():
+            if not isinstance(fetched, MetadataFetched):
+                continue
             try:
                 self._apply_fetched(fetched)
             except Exception as e:

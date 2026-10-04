@@ -4,16 +4,28 @@ import sys
 import threading
 import time
 import urllib.parse
+from dataclasses import dataclass
+from typing import Any
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from modalapi import board_fetch
-from modalapi.board_fetch import BoardFetcher, MetadataFetched, MetadataFetcher, fetch_metadata
+from modalapi.board_fetch import (
+    BoardFetcher,
+    BoardJob,
+    BoardResolved,
+    Fetcher,
+    MetadataFetched,
+    fetch_metadata,
+    resolve_board,
+)
+from modalapi.plugin_customization import PluginCustomization, PluginExtraData
 from tests.fake_board_fetcher import FakeBoardFetcher
 
 ROOT = "http://localhost:80/"
+BUNDLE = "/home/pistomp/data/.pedalboards/Rig.pedalboard"
 DRIVE = "http://example.com/drive"
 DELAY = "http://example.com/delay"
 DRIVE_INFO = {"name": "Drive", "category": ["Distortion"]}
@@ -45,7 +57,7 @@ def _get_serving(table):
 
 def _wait_for(fetcher, count, timeout=2.0):
     deadline = time.monotonic() + timeout
-    results: list[MetadataFetched] = []
+    results: list[Any] = []
     while len(results) < count and time.monotonic() < deadline:
         results.extend(fetcher.drain())
         time.sleep(0.005)
@@ -227,10 +239,11 @@ def test_request_after_cleanup_is_ignored():
 
 
 def test_fake_fetcher_satisfies_the_protocol_and_resolves_inline():
-    fake: MetadataFetcher = FakeBoardFetcher()
+    fake: Fetcher = FakeBoardFetcher()
     with patch("pistomp.httpclient.post", return_value=_resp(200, {DRIVE: DRIVE_INFO})), patch("pistomp.httpclient.get"):
         fake.request_metadata([DRIVE])
         [result] = fake.drain()
+    assert isinstance(result, MetadataFetched)
     assert dict(result.info) == {DRIVE: DRIVE_INFO}
     assert fake.drain() == []
 
@@ -244,13 +257,158 @@ def test_fake_fetcher_holds_until_released():
         assert fake.requests == [(DRIVE,)]
         fake.release()
         [result] = fake.drain()
+    assert isinstance(result, MetadataFetched)
     assert dict(result.info) == {DRIVE: DRIVE_INFO}
+
+
+def _router(routes):
+    """GET handler serving `routes[path-fragment] -> (status, body)`; a value that is
+    an Exception is raised. Unlisted URLs 404."""
+
+    def get(url, headers=None, timeout=None):
+        for fragment, outcome in routes.items():
+            if fragment in url:
+                if isinstance(outcome, Exception):
+                    raise outcome
+                status, body = outcome
+                text = body if isinstance(body, str) else json.dumps(body)
+                return SimpleNamespace(status_code=status, text=text)
+        return SimpleNamespace(status_code=404, text="{}")
+
+    return get
+
+
+def test_resolve_board_gathers_bundle_snapshots_and_metadata():
+    routes = {"pedalboard/current": (200, BUNDLE), "snapshot/list": (200, {"0": "Clean", "1": "Lead"})}
+    with (
+        patch("pistomp.httpclient.post", return_value=_resp(200, {DRIVE: DRIVE_INFO})),
+        patch("pistomp.httpclient.get", side_effect=_router(routes)),
+    ):
+        out = resolve_board(ROOT, BoardJob(ticket=7, uris=(DRIVE,), known_bundles=frozenset({BUNDLE})), None, None)
+    assert out.ticket == 7
+    assert dict(out.metadata) == {DRIVE: DRIVE_INFO}
+    assert (out.bundle, out.bundle_known) == (BUNDLE, True)
+    assert dict(out.snapshots or {}) == {0: "Clean", 1: "Lead"}
+    assert out.boards is None
+
+
+def test_resolve_board_strips_a_trailing_slash_and_a_json_string():
+    for body in (BUNDLE + "/", json.dumps(BUNDLE)):
+        with patch("pistomp.httpclient.get", side_effect=_router({"pedalboard/current": (200, body)})):
+            assert resolve_board(ROOT, BoardJob(ticket=1), None, None).bundle == BUNDLE
+
+
+def test_resolve_board_unsaved_board_has_no_bundle_but_is_known():
+    with patch("pistomp.httpclient.get", side_effect=_router({"pedalboard/current": (200, "")})):
+        out = resolve_board(ROOT, BoardJob(ticket=1), None, None)
+    assert (out.bundle, out.bundle_known) == (None, True)
+
+
+def test_resolve_board_falls_back_to_last_json_when_current_fails():
+    with patch("pistomp.httpclient.get", side_effect=_router({"pedalboard/current": ConnectionRefusedError("x")})):
+        out = resolve_board(ROOT, BoardJob(ticket=1), lambda: BUNDLE, None)
+    assert (out.bundle, out.bundle_known) == (BUNDLE, True)
+
+
+def test_resolve_board_with_nothing_answering_is_all_failed_not_an_error():
+    with (
+        patch("pistomp.httpclient.post", side_effect=ConnectionRefusedError("x")),
+        patch("pistomp.httpclient.get", side_effect=ConnectionRefusedError("x")),
+    ):
+        out = resolve_board(ROOT, BoardJob(ticket=3, uris=(DRIVE,)), lambda: None, None)
+    assert out == BoardResolved.failed(3)
+
+
+def test_resolve_board_refetches_the_list_only_for_an_unknown_bundle():
+    boards = [{"title": "Rig", "bundle": BUNDLE}, {"title": "Other", "bundle": "/b/other.pedalboard"}]
+    routes = {
+        "pedalboard/current": (200, BUNDLE),
+        "snapshot/list": (200, {"0": "Default"}),
+        "pedalboard/list": (200, boards),
+    }
+    with patch("pistomp.httpclient.get", side_effect=_router(routes)) as get:
+        unknown = resolve_board(ROOT, BoardJob(ticket=1), None, None)
+        known = resolve_board(ROOT, BoardJob(ticket=2, known_bundles=frozenset({BUNDLE})), None, None)
+    assert unknown.boards == (("Rig", BUNDLE), ("Other", "/b/other.pedalboard"))
+    assert known.boards is None
+    assert sum("pedalboard/list" in c.args[0] for c in get.call_args_list) == 1
+
+
+def test_resolve_board_bad_snapshot_list_is_none():
+    routes = {"pedalboard/current": (200, BUNDLE), "snapshot/list": (500, {})}
+    with patch("pistomp.httpclient.get", side_effect=_router(routes)):
+        assert resolve_board(ROOT, BoardJob(ticket=1), None, None).snapshots is None
+
+
+@dataclass(frozen=True)
+class _Notes(PluginExtraData):
+    pass
+
+
+def test_resolve_board_reads_extra_data_through_the_injected_customizer():
+    seen = []
+
+    def ttl_reader(uri, bundlepath="", instance_number=None):
+        seen.append((uri, bundlepath, instance_number))
+        if uri == DRIVE:
+            return PluginCustomization(extra_data=_Notes())
+        raise OSError("no ttl")
+
+    job = BoardJob(ticket=1, ttl_targets=(("drive", 4, DRIVE), ("delay", 5, DELAY)))
+    with patch("pistomp.httpclient.get", side_effect=_router({"pedalboard/current": (200, BUNDLE)})):
+        out = resolve_board(ROOT, job, None, ttl_reader)
+    assert list(out.extra_data) == ["drive"]
+    assert seen == [(DRIVE, BUNDLE, 4), (DELAY, BUNDLE, 5)]
+
+
+def test_resolve_board_skips_extra_data_without_a_bundle():
+    called = []
+
+    def ttl_reader(uri, bundlepath="", instance_number=None):
+        called.append((uri, bundlepath, instance_number))
+        return PluginCustomization()
+
+    job = BoardJob(ticket=1, ttl_targets=(("drive", 4, DRIVE),))
+    with patch("pistomp.httpclient.get", side_effect=_router({"pedalboard/current": (200, "")})):
+        out = resolve_board(ROOT, job, None, ttl_reader)
+    assert called == [] and dict(out.extra_data) == {}
+
+
+def test_worker_serves_board_jobs_and_metadata_batches_in_order(fetcher):
+    routes = {"pedalboard/current": (200, BUNDLE), "snapshot/list": (200, {"0": "Default"})}
+    with (
+        patch("pistomp.httpclient.post", return_value=_resp(200, {DRIVE: DRIVE_INFO})),
+        patch("pistomp.httpclient.get", side_effect=_router(routes)),
+    ):
+        fetcher.request_metadata([DRIVE])
+        fetcher.request_board(BoardJob(ticket=9))
+        first, second = _wait_for(fetcher, 2)
+    assert isinstance(first, MetadataFetched) and isinstance(second, BoardResolved)
+    assert second.ticket == 9
+
+
+def test_worker_survives_a_failing_board_job(fetcher):
+    with patch.object(board_fetch, "resolve_board", side_effect=[RuntimeError("boom")]):
+        fetcher.request_board(BoardJob(ticket=4))
+        [result] = _wait_for(fetcher, 1)
+    assert result == BoardResolved.failed(4)
+
+
+def test_fake_fetcher_resolves_board_jobs_and_holds_them():
+    fake = FakeBoardFetcher()
+    with patch("pistomp.httpclient.get", side_effect=_router({"pedalboard/current": (200, BUNDLE)})):
+        fake.hold = True
+        fake.request_board(BoardJob(ticket=1))
+        assert fake.drain() == [] and fake.board_jobs == [BoardJob(ticket=1)]
+        fake.release()
+        [out] = fake.drain()
+    assert isinstance(out, BoardResolved) and out.bundle == BUNDLE
 
 
 def test_board_fetch_imports_neither_the_handler_nor_the_board():
     code = (
         "import sys, modalapi.board_fetch;"
-        "bad = [m for m in ('modalapi.modhandler', 'modalapi.pedalboard', 'modalapi.ws_protocol') if m in sys.modules];"
+        "bad = [m for m in ('modalapi.modhandler', 'modalapi.pedalboard', 'modalapi.ws_protocol', 'modalapi.board_sync', 'modalapi.plugins') if m in sys.modules];"
         "sys.exit(1 if bad else 0)"
     )
     assert subprocess.run([sys.executable, "-c", code], check=False).returncode == 0
