@@ -22,7 +22,7 @@ not just to badge.
 ### How often do they actually diverge?
 
 Measured against the live device — all 663 plugins, 5913 control-input ports,
-via the same `/effect/get` call `Pedalboard.get_plugin_data` makes:
+via the same `/effect/get` call `board_fetch` makes:
 
 | | |
 |---|---|

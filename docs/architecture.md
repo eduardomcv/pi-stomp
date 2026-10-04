@@ -32,8 +32,11 @@ YAML). The "business logic" brain of the app for v1 is the (legacy/unsupported)
 4. Load default config → determine hardware version
 5. Create handler (Mod or Modhandler) via Handlerfactory
 6. Create hardware (Pistomp / Pistompcore / Pistomptre) via Hardwarefactory
-7. Load pedalboards (LILV parser)
-8. Load current pedalboard → reinit hardware → bind controllers
+7. Load the pedalboard list (REST `pedalboard/list`: titles and bundles only)
+8. Await the initial board: pump the WebSocket until mod-ui's connect dump has been
+   folded into a board and installed (`install_board` → reinit hardware → bind
+   controllers). If nothing arrives within the timeout, install an empty "Untitled"
+   board instead
 ```
 
 The loop runs every 10ms, with slower tasks at multiples:
@@ -41,10 +44,10 @@ The loop runs every 10ms, with slower tasks at multiples:
 | Period | Call | Purpose |
 |--------|------|---------|
 | 10ms | `poll_controls()` | Read all hardware inputs |
-| 10ms | `poll_ws_messages()` | Drain inbound WebSocket |
+| 10ms | `poll_ws_messages()` | Drain inbound WebSocket, drain `BoardFetcher` results, run the `BoardSync` watchdogs |
 | 20ms | `poll_indicators()` | Update LEDs, VU meters |
 | ~80ms* | `poll_lcd_updates()` | Render LCD |
-| 1000ms | `poll_modui_changes()` | Check `last.json` mtime, banks mtime |
+| 1000ms | `poll_modui_changes()` | `last.json` mtime requests a bundle/snapshot rebase; banks mtime reloads banks |
 | 2000ms | `poll_wifi()`, `poll_ethernet()` | Network status |
 | 60s | `poll_system_info()` | CPU throttling, temperature |
 
@@ -184,15 +187,17 @@ mod-ui's connect dump; mod-ui never sends it, and `messages_received` does not c
 |---------|---------------|--------|
 | `param_set …/:bypass v` | `PluginBypassMessage` | Set bypass, redraw |
 | `param_set …/{sym} v` | `ParamSetMessage` | `Plugin.set_param_value`: cache value + mirror onto any bound control |
-| `add {inst} … {bypassed} …` | `AddPluginMessage` | Connect/reconnect dump only; bypass in field 4 |
-| `loading_end {snapshot} {title}` | `LoadingEndMessage` | Keep title on the message; stash snapshot index for file-watch path |
-| `pedal_snapshot {id} {name}` | `PedalSnapshotMessage` | In-board snapshot change |
+| `add {inst} … {bypassed} …` | `AddPluginMessage` | Inside a window: into the `BoardBuilder`. Outside: a live add (below) |
+| `loading_start {empty} {modified}` | `LoadingStartMessage` | Opens a window: raises `_is_pedalboard_loading`, starts a `BoardBuilder`, bumps the ticket, shows "Loading..." for a board load |
+| `loading_end {snapshot} {title}` | `LoadingEndMessage` | Closes the window: clears `_is_pedalboard_loading`, freezes the builder into a `BoardSpec` and requests one `BoardJob` |
+| `remove :all` | `ResetMessage` | Inside a window: clears the builder. Outside: `clear_board` empties the live board |
+| `plugin_pos {inst} {x} {y}` | `PluginPosMessage` | Inside a window: canvas position for the builder (sets tile order) |
+| `:connected` | `ConnectedMessage` | Synthetic marker: the next window is a connect dump (`REPLAY`), not a board load |
+| `pedal_snapshot {id} {name}` | `PedalSnapshotMessage` | Inside a window: the active snapshot for the builder. Outside: in-board snapshot change |
 
 `ws_protocol.py` parses raw text into typed dataclasses — plus several
-recognized-but-mostly-ignored kinds (`LoadingStartMessage`, which carries
-`empty`/`modified` flags, `ResetMessage` (`remove :all`), `PluginPosMessage`,
-`ConnectedMessage`, `SizeMessage`, `AddHwPortMessage`, `TrueBypassMessage`,
-`MidiMapMessage`, …); anything else becomes
+recognized-but-mostly-ignored kinds (`SizeMessage`, `AddHwPortMessage`,
+`TrueBypassMessage`, …); anything else becomes
 `UnknownMessage`. `ping` messages receive a `pong` reply; `data_ready` messages are
 echoed back.
 
@@ -274,9 +279,11 @@ board load, or the connect dump on every WebSocket connect. While it is open,
 inbound graph messages are replay rather than news, and outbound parameter sends are
 refused — `_publish_plugin_param`, `_publish_cc` for a bound encoder or analog
 control, and `set_mod_tap_tempo` for the transport BPM,
-which the tap-tempo footswitch also reaches directly. `set_current_pedalboard` also clears the flag, as
-the point where we have caught up with the board mod-ui loaded; that covers the one
-case mod-ui abandons its own window, an aborted load returning before `loading_end`.
+which the tap-tempo footswitch also reaches directly. `loading_start` raises the flag;
+`loading_end` clears it. `install_board` also clears it, as the point where we have
+caught up with the board mod-ui loaded. The `BoardSync` watchdog covers the one case
+mod-ui abandons its own window, an aborted load returning before `loading_end`: a
+window still BUILDING after 30 s is dropped and `abort_window` clears the flag.
 Nothing else may raise it: a window that nothing closes refuses every send for the
 rest of the session.
 
@@ -291,15 +298,64 @@ already in `plugin_dict`. Otherwise the add is parked in `PendingAdds` and
 exists; a `remove`, a `loading_start` or a board change drops the pending add. A
 plugin whose metadata cannot be fetched becomes a bypass-only tile.
 
-## Pedalboard Data Loading
+## Board From the Stream
 
-LILV parses `.ttl` files in the pedalboard bundle into `Pedalboard` → `Plugin` →
-`Parameter` objects. Binding maps each plugin's MIDI bindings to
-`controllers["{channel}:{CC}"]`, linking hardware controls to plugin parameters.
+pi-Stomp builds the board it shows from what mod-ui streams, plus one REST round trip
+for what the stream leaves out. Nothing is read from the bundle on disk.
+`modalapi/board_sync.py` (`BoardSync`) folds the stream; `modalapi/board_spec.py`
+(`BoardBuilder`, `BoardSpec`) holds the folded graph; `Pedalboard.from_spec` turns it
+into the model.
 
-Change detection: `FileChangeMonitor` watches `/home/pistomp/data/last.json` mtime.
-When MOD-UI writes it (pedalboard change), pi-Stomp reloads the pedalboard and syncs
-hardware. Banks are watched similarly via `banks.json` mtime (v3/Modhandler only).
+- **Windows.** `loading_start … loading_end` brackets mod-ui replaying a whole board.
+  It opens on every board load (`LOAD`: shows "Loading...") and on every WebSocket
+  connect (`REPLAY`: the synthetic `:connected` marker precedes it; no loading screen).
+  While one is open, board-scoped messages (`add`, `remove`, `connect`, `disconnect`,
+  `param_set`, bypass, `midi_map`, `patch_set`, `plugin_pos`, `remove :all`,
+  `pedal_snapshot`) go to the `BoardBuilder` rather than the live board.
+- **Ticket.** Each `loading_start` bumps a ticket. At `loading_end` one `BoardJob`
+  carries it to the `BoardFetcher` worker: metadata for URIs missing from
+  `plugin_dict` (`POST effect/bulk/`, then `GET effect/get`), the current bundle
+  (`pedalboard/current`, falling back to `last.json`), `snapshot/list`, and
+  `pedalboard/list` only when the bundle is not already known, plus the extra data a
+  customizer reads from the TTL. A result whose ticket is not the current one is
+  dropped, so a newer window supersedes a slower older job. State is `IDLE` →
+  `BUILDING` (window open) → `RESOLVING` (job out) → `IDLE`. A `RESOLVING` job that has
+  not returned after 30 s completes with what the stream gave.
+- **Reconcile vs swap.** The candidate board comes from `Pedalboard.from_spec`. If the
+  live board has the same bundle and the same structure (plugins and their URIs in
+  tile order, and the same wiring), `reconcile_board` updates it in place: bypass,
+  values, bindings, title, snapshots, extra data. Panels stay open, selection stays
+  put. Otherwise `install_board` swaps it in: it pops panels that do not persist across
+  boards, closes the old `Current`, reinits hardware from the new bundle's config,
+  rebinds controllers and redraws. `install_board` also clears
+  `_is_pedalboard_loading`.
+- **Rebase.** Saving, renaming or save-as changes the bundle and snapshot list
+  without opening a window. A `last.json` mtime change while `IDLE` requests a rebase:
+  a job with no metadata to fetch, applied by `rebase_board` (new bundle, title,
+  snapshots, config reinit, board list refresh). One rebase is in flight at a time;
+  further requests coalesce into one follow-up. A window opening cancels it.
+- **Blend gate.** Blend snapshot sync (which writes snapshot entries into MOD) runs
+  only when the bundle is known and the window was a board load, or a replay of a board
+  with no unsaved edits.
+- **Startup await.** `Modhandler.await_initial_board` pumps `poll_ws_messages()` until
+  the first board has been applied. mod-ui's connect dump is already queued by then, so
+  it normally returns on the first pump. A window already in flight when the timeout
+  expires is given up to 60 s more. With no stream at all, an empty "Untitled" board is
+  installed so the UI comes up regardless.
+- **Fetching is off the UI thread.** `BoardFetcher` owns a daemon worker and never
+  raises; a part of a job that fails comes back as its unknown value and the board is
+  built with the rest. The handler that creates the fetcher closes it.
+
+### Known limitations
+
+1. **Reset baseline.** A plugin panel's Reset restores `pedalboard_snapshot`, captured
+   when the board is built. After a pi-Stomp restart while mod-ui holds unsaved edits,
+   the board is built from the live (edited) values, so Reset on an edited parameter is
+   a no-op until the board is reloaded. Owner decision.
+2. **Edits during resolution.** Edits made on the device between `loading_end` and the
+   swap are not echoed back to the sender by mod-ui, so the new board does not reflect
+   them until its next echo. The gap is the resolution round trip: tens of ms with
+   cached metadata, up to a few seconds on a first load with uncached metadata.
 
 ## Blend Mode
 
@@ -352,16 +408,22 @@ poll_controls() (10ms)
 ### Pedalboard Change (via MOD-UI)
 
 ```
-MOD-UI writes /home/pistomp/data/last.json
+MOD-UI loads a board: loading_start, add/connect/param_set/midi_map/… , loading_end
+  → BoardSync.feed(): BoardBuilder folds the window, ticket bumped, "Loading..." shown
+  → loading_end: BoardJob(ticket, missing URIs, …) → BoardFetcher worker (REST)
+  → poll_ws_messages() drains the result → BoardSync.on_resolved(ticket matches)
+    → Pedalboard.from_spec(spec, plugin_dict, bundle, …)
+    → same bundle and structure → reconcile_board() in place
+    → otherwise install_board(pb, presets, index)
+        → Load {bundle}/config.yml
+        → hardware.reinit(cfg) — overlay config
+        → ControllerManager.bind() — map controllers to parameters
+        → lcd.link_data() → lcd.draw_main_panel()
+        → Prepare blend modes if configured (the blend gate)
+
+MOD-UI writes last.json with no window (save, rename)
   → FileChangeMonitor detects mtime change (1000ms poll)
-    → reload_pedalboard(bundle)
-      → LILV parses TTL → Pedalboard(Plugin, Parameter) objects
-        → set_current_pedalboard(pb)
-          → Load {bundle}/config.yml
-          → hardware.reinit(cfg) — overlay config
-          → ControllerManager.bind() — map controllers to parameters
-          → lcd.link_data() → lcd.draw_main_panel()
-          → Prepare blend modes if configured
+    → BoardSync.request_rebase() → rebase_board(bundle, snapshots)
 ```
 
 ### Footswitch Press → Plugin Bypass
@@ -468,10 +530,13 @@ reads the ADC and sends current position on pedalboard load.
 - `blend/stop.py` — Pre-computed diff maps between snapshots
 
 **MOD API**
-- `modalapi/pedalboard.py` — LILV TTL parser
+- `modalapi/pedalboard.py` — `Pedalboard` model; `from_spec` builds it from a `BoardSpec` and the metadata in `plugin_dict`, never from disk or REST
+- `modalapi/board_spec.py` — `BoardBuilder` folds one stream window into a frozen `BoardSpec`
+- `modalapi/board_sync.py` — `BoardSync` state machine: windows, ticket, reconcile vs swap, rebase, blend gate
+- `modalapi/board_fetch.py` — `BoardFetcher` worker: metadata, bundle, snapshots, board list and TTL extra data over REST, off the UI thread
 - `modalapi/websocket_bridge.py` — Async WS bridge (daemon thread, reconnect)
 - `modalapi/ws_protocol.py` — Message parsing into typed dataclasses
-- `modalapi/pedalboard_monitor.py` — FileChangeMonitor for last.json/banks.json
+- `modalapi/pedalboard_monitor.py` — FileChangeMonitor for last.json (triggers a rebase) and banks.json
 - `common/parameter.py` — Parameter representation, formatting, taper
 - `modalapi/plugin.py` — Plugin representation
 

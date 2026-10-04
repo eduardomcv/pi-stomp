@@ -1088,9 +1088,7 @@ class Modhandler(Handler):
         self.pedalboards = {}
         self.pedalboard_list = []
         for title, bundle in boards:
-            # Left unhydrated: only the current board's graph is ever read, and
-            # hydrating all of them here cost ~10s of startup.
-            pedalboard = Pedalboard.Pedalboard(title, bundle, root_uri=self.root_uri, customizer=plugin_lookup)
+            pedalboard = Pedalboard.Pedalboard(title, bundle, customizer=plugin_lookup)
             self.pedalboards[bundle] = pedalboard
             self.pedalboard_list.append(pedalboard)
 
@@ -1139,7 +1137,6 @@ class Modhandler(Handler):
             self.set_current_pedalboard(board)
 
     def set_current_pedalboard(self, pedalboard):
-        pedalboard.hydrate(self.plugin_dict)  # removed in Task 7
         self.install_board(pedalboard, {0: "Default"}, 0, sync_blend=True)
 
     def install_board(

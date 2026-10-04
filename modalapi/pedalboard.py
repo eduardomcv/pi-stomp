@@ -17,8 +17,6 @@
 
 import json
 import logging
-import pistomp.httpclient as req
-import urllib.parse
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Optional
@@ -99,7 +97,7 @@ def _port_default(pp: PortInfo) -> float:
 
 
 def _time_info(transport: TransportMessage | None, midi: Mapping[Symbol, MidiMapSpec]) -> dict:
-    """hydrate's timeInfo block rebuilt from the stream: values from the transport
+    """The timeInfo block rebuilt from the stream: values from the transport
     broadcast, bindings from the /pedalboard MIDI maps."""
     time_info: dict = {}
     if transport is not None:
@@ -112,50 +110,18 @@ def _time_info(transport: TransportMessage | None, midi: Mapping[Symbol, MidiMap
 
 
 class Pedalboard:
-    def __init__(self, title, bundle, root_uri="http://localhost:80/", customizer: Customizer | None = None):
-        self.root_uri = root_uri
+    def __init__(self, title, bundle, customizer: Customizer | None = None):
         self.title = title
-        self.bundle = bundle  # TODO used?
+        self.bundle = bundle
         # Resolver injected by the composition root (handler); defaults to a
         # no-op so headless/v1 construction degrades to standard behaviour
         # instead of silently depending on plugin-package import order.
         self._customizer: Customizer = customizer or default_customizer
         self.plugins = []
         self.connections: list[Connection] = []
-        self.hydrated = False
         # Synthetic /pedalboard pseudo-instance carrying :bpm/:bpb/:rolling.
         # Excluded from self.plugins so the effect-graph render never paints it.
         self.transport_plugin: Plugin.Plugin = self._build_transport_plugin(None)
-
-    def get_plugin_data(self, uri):
-        url = self.root_uri + "effect/get?uri=" + urllib.parse.quote(uri)
-        try:
-            resp = req.get(url, headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
-        except Exception as e:
-            logging.error("Cannot connect to mod-ui: %s", e)
-            return {}
-
-        if resp.status_code != 200:
-            logging.error("mod-ui not able to get plugin data: %s\nStatus: %s" % (url, resp.status_code))
-            return {}
-
-        return json.loads(resp.text)
-
-    def get_pedalboard_info(self) -> dict:
-        """mod-ui's own parse of the bundle. It walks the TTL in C++; doing it here
-        through the lilv python bindings cost ~0.8s per board at startup."""
-        url = self.root_uri + "pedalboard/info/?bundlepath=" + urllib.parse.quote(self.bundle)
-        try:
-            resp = req.get(url)
-        except Exception as e:
-            logging.error("Cannot connect to mod-ui: %s", e)
-            return {}
-
-        if resp.status_code != 200:
-            logging.error("mod-ui not able to get pedalboard info: %s  Status: %s" % (url, resp.status_code))
-            return {}
-
-        return json.loads(resp.text)
 
     @staticmethod
     def _binding(cc: MidiCC | None) -> Optional[str]:
@@ -163,16 +129,6 @@ class Pedalboard:
         if not cc or cc.get("channel", -1) < 0:
             return None
         return "%d:%d" % (cc["channel"], cc["control"])
-
-    @staticmethod
-    def _binding_range(cc: MidiCC | None) -> Optional[tuple[float, float]]:
-        # A MIDI-CC addressing's custom sub-range. hasRanges guards the format
-        # compat default (0..1); mirror mod-ui's max>min guard (host.py).
-        if not cc or cc.get("channel", -1) < 0 or not cc.get("hasRanges"):
-            return None
-        lo = float(cc.get("minimum", 0.0))
-        hi = float(cc.get("maximum", 1.0))
-        return (lo, hi) if hi > lo else None
 
     @classmethod
     def from_spec(
@@ -252,109 +208,13 @@ class Pedalboard:
             for src, dst in spec.connections
         ]
         pb.transport_plugin = pb._build_transport_plugin(_time_info(transport, spec.transport_midi))
-        pb.hydrated = True
         return pb
 
     @classmethod
     def empty(cls, customizer: Customizer | None = None) -> "Pedalboard":
         """The board mod-ui holds after a reset: untitled, unsaved, no plugins."""
         pb = cls("", None, customizer=customizer)
-        pb.hydrated = True
         return pb
-
-    def hydrate(self, plugin_dict) -> None:
-        """Populate plugins and connections from mod-ui. Idempotent."""
-        if self.hydrated:
-            return
-
-        info = self.get_pedalboard_info()
-        if not info:
-            return
-
-        all_plugins: list[Plugin.Plugin] = []
-        instance_to_info: dict[str, Optional[dict]] = {}
-
-        for pb_plugin in info.get("plugins", []):
-            instance_id = pb_plugin["instance"].lstrip("/")
-            plugin_uri = pb_plugin["uri"]
-
-            plugin_info = plugin_dict.get(plugin_uri)
-            if plugin_info is None:
-                plugin_info = self.get_plugin_data(plugin_uri)
-                if plugin_info:
-                    plugin_dict[plugin_uri] = plugin_info
-
-            category = None
-            cat = (plugin_info or {}).get("category")
-            if cat is not None and len(cat) > 0:
-                category = cat[0]
-
-            parameters: dict[Symbol, Parameter] = {}
-            parameters[BYPASS_SYMBOL] = Parameter(
-                _bypass_info(),
-                1.0 if pb_plugin.get("bypassed") else 0.0,
-                self._binding(pb_plugin.get("bypassCC")),
-                instance_id,
-            )
-
-            plugin_params = _control_inputs(plugin_info)
-            if plugin_params is None:
-                logging.warning("plugin port info not found, could be missing LV2 for: %s", instance_id)
-                plugin_params = []
-
-            port_values = {port["symbol"]: port for port in pb_plugin.get("ports", [])}
-            for pp in plugin_params:
-                symbol = Symbol(pp["symbol"])
-                port = port_values.get(pp["symbol"])
-                if port is None:
-                    continue
-                parameters[symbol] = Parameter(
-                    pp,
-                    float(port["value"]),
-                    self._binding(port.get("midiCC")),
-                    instance_id,
-                    binding_range=self._binding_range(port.get("midiCC")),
-                )
-
-            n_int = pb_plugin.get("instanceNumber")
-            if n_int is not None and n_int < 0:
-                n_int = None
-
-            inst = Plugin.Plugin(
-                instance_id,
-                parameters,
-                plugin_info,
-                category,
-                uri=plugin_uri,
-                customization=self._customizer(plugin_uri, self.bundle, n_int),
-                instance_number=n_int,
-            )
-            inst.canvas_x = float(pb_plugin.get("x", 0.0))
-            inst.canvas_y = float(pb_plugin.get("y", 0.0))
-            instance_to_info[instance_id] = plugin_info
-            all_plugins.append(inst)
-
-        # Order by MOD-UI canvas position: left-to-right (audio flow), then
-        # top-to-bottom. instance_id breaks any exact-coordinate tie.
-        self.plugins = sorted(all_plugins, key=lambda p: (p.canvas_x, p.canvas_y, p.instance_id))
-
-        self.connections = []
-        for arc in info.get("connections", []):
-            try:
-                # mod-ui already strips the bundle path off both endpoints.
-                self.connections.append(build_connection(arc["source"], arc["target"], "", instance_to_info))
-            except Exception as e:
-                logging.warning("Failed to parse arc %s -> %s: %s", arc.get("source"), arc.get("target"), e)
-
-        # Capture snapshot of all parameter values for Reset
-        for plugin in self.plugins:
-            plugin.pedalboard_snapshot = {
-                sym: float(p.value) for sym, p in plugin.parameters.items()
-            }
-
-        self.transport_plugin = self._build_transport_plugin(info.get("timeInfo"))
-
-        self.hydrated = True
 
     def _build_transport_plugin(self, time_info: dict | None) -> Plugin.Plugin:
         """The /pedalboard pseudo-instance carrying :bpm/:bpb/:rolling. Built
@@ -414,7 +274,7 @@ class Pedalboard:
 
         Parameters start at REST defaults; bypass is set false. MIDI bindings
         arrive later via midi_map WS messages; values arrive via param_set.
-        Empty info (metadata unfetchable) yields a bypass-only plugin, as hydrate and from_spec do for a missing LV2.
+        Empty info (metadata unfetchable) yields a bypass-only plugin, as from_spec does for a missing LV2.
         """
         category = None
         cat = info.get("category")

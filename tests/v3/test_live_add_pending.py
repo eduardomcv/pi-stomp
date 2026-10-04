@@ -1,7 +1,8 @@
+from unittest.mock import patch
+
 import pytest
 
 from common.parameter import BYPASS_SYMBOL, Symbol
-from modalapi.pedalboard import Pedalboard
 from tests.fake_board_fetcher import FakeBoardFetcher
 from tests.types import SystemFixture
 from tests.v3.test_dynamic_pedalboard import (
@@ -13,14 +14,6 @@ from tests.v3.test_dynamic_pedalboard import (
 )
 
 CHORUS_ADD = f"add /graph/ExtraChorus {_EXTRA_CHORUS_URI} 900.0 50.0 0 1 1"
-
-
-@pytest.fixture(autouse=True)
-def _no_inline_fetch(monkeypatch):
-    def boom(*_args, **_kwargs):
-        raise AssertionError("the handler fetched plugin metadata inline")
-
-    monkeypatch.setattr(Pedalboard, "get_plugin_data", boom)
 
 
 def _serve(system: SystemFixture) -> None:
@@ -55,6 +48,20 @@ def test_add_waits_for_metadata_without_blocking_the_tick(parallel_beths_system:
     fetcher.release()
     system.handler.poll_ws_messages()
     assert "ExtraChorus" in _ids(system)
+
+
+def test_the_handler_issues_no_rest_call_of_its_own_on_the_live_path(parallel_beths_system: SystemFixture):
+    system = parallel_beths_system
+    _serve(system)
+    fetcher = _fetcher(system)
+    fetcher.hold = True
+
+    with patch("pistomp.httpclient.get", side_effect=system.mock_get.side_effect) as spy:
+        system.ws_bridge.inject(CHORUS_ADD)
+        system.handler.poll_ws_messages()
+
+    assert not any("effect/get" in str(c.args[0]) for c in spy.call_args_list)
+    assert "ExtraChorus" not in _ids(system)
 
 
 def test_messages_for_a_pending_plugin_are_replayed_once_it_exists(parallel_beths_system: SystemFixture):

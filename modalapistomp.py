@@ -140,7 +140,7 @@ def main():
         hw = factory.create(cfg, handler, midiout)
         handler.add_hardware(hw)
 
-        # Load all pedalboard info (titles/bundles; graphs hydrate on selection)
+        # Load the pedalboard list (titles/bundles); the current board arrives from the mod-ui stream
         handler.load_banks()
         handler.load_pedalboards()
 

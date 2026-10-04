@@ -222,11 +222,9 @@ def test_transport_plugin_defaults_without_a_transport_message():
     assert (tp[BPM_SYMBOL].value, tp[BPB_SYMBOL].value, tp[ROLLING_SYMBOL].value) == (120.0, 4.0, 0.0)
 
 
-def test_from_spec_board_is_hydrated_and_carries_identity():
+def test_from_spec_board_carries_identity():
     pb = Pedalboard.from_spec(spec_of(_add("chorus")), INFO, None, "Scratch", None, default_customizer, _no_patch)
-    assert pb.hydrated
     assert (pb.title, pb.bundle) == ("Scratch", None)
-    pb.hydrate({})
     assert pb.plugins[0].pedalboard_snapshot == {
         BYPASS_SYMBOL: 0.0,
         Symbol("rate"): 1.0,
@@ -237,8 +235,7 @@ def test_from_spec_board_is_hydrated_and_carries_identity():
 
 def test_empty_board():
     pb = Pedalboard.empty()
-    assert (pb.title, pb.bundle, pb.plugins, pb.connections, pb.hydrated) == ("", None, [], [], True)
-    pb.hydrate({})
+    assert (pb.title, pb.bundle, pb.plugins, pb.connections) == ("", None, [], [])
     assert pb.transport_plugin.parameters[BPM_SYMBOL].value == 120.0
 
 

@@ -18,8 +18,7 @@ The plugin keeps its declared range; the sub-range controls physical MIDI conver
 and step grids only.
 """
 
-from common.parameter import MidiCC, Parameter, PortInfo
-from modalapi.pedalboard import Pedalboard
+from common.parameter import Parameter, PortInfo
 
 
 def _port(minimum: float = 0.0, maximum: float = 1.0) -> PortInfo:
@@ -102,26 +101,3 @@ def test_clear_binding_range_is_idempotent():
     assert len(notifications) == 0
     p.clear_binding_range()
     assert len(notifications) == 0
-
-
-# ── Pedalboard._binding_range (the static pedalboard/info midiCC dict) ──────
-
-
-def test_binding_range_from_midicc_with_custom_ranges():
-    cc = MidiCC(channel=0, control=70, hasRanges=True, minimum=0.0, maximum=0.5)
-    assert Pedalboard._binding_range(cc) == (0.0, 0.5)
-
-
-def test_binding_range_none_without_hasranges():
-    cc = MidiCC(channel=0, control=70, hasRanges=False, minimum=0.0, maximum=1.0)
-    assert Pedalboard._binding_range(cc) is None
-
-
-def test_binding_range_none_when_unmapped():
-    assert Pedalboard._binding_range(None) is None
-    assert Pedalboard._binding_range(MidiCC(channel=-1, control=0, hasRanges=True, minimum=0.0, maximum=0.5)) is None
-
-
-def test_binding_range_none_when_degenerate():
-    cc = MidiCC(channel=0, control=70, hasRanges=True, minimum=0.5, maximum=0.5)
-    assert Pedalboard._binding_range(cc) is None

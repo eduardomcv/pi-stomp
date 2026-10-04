@@ -36,7 +36,7 @@ def _attach_transport_plugin(handler, *, bpm_cc=None, bpb_cc=None, rolling_cc=No
 
 
 def test_transport_plugin_built_from_timeinfo(v3_system: SystemFixture):
-    """hydrate() builds the transport pseudo-plugin from timeInfo; its three
+    """The board builds the transport pseudo-plugin from timeInfo; its three
     parameters carry the right symbols, names, and ranges."""
     handler = v3_system.handler
     assert handler.current is not None
