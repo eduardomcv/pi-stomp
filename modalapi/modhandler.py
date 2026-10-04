@@ -61,7 +61,8 @@ from common.contexts import (
 from common.parameter import BYPASS_SYMBOL, Parameter, PortInfo, Symbol
 from common.param_source import ParamSink
 from common.parameter_editing import EditContext, ParameterSteps, effective_multiplier
-from modalapi.board_fetch import BoardFetcher, Fetcher, MetadataFetched
+from modalapi.board_fetch import BoardFetcher, BoardJob, Fetcher, MetadataFetched
+from modalapi.board_sync import UNTITLED
 from modalapi.pending_add import PendingAdds
 from modalapi.plugin import Plugin
 from blend.input_controller import InputController
@@ -165,7 +166,9 @@ class Modhandler(Handler):
         self.pedalboards = {}
         self.pedalboard_list = []  # TODO LAME to have two lists
         self.plugin_dict = {}
-        self.board_fetcher: Fetcher = BoardFetcher(self.root_uri)
+        self.customizer = plugin_lookup
+        self.patch_parser = patch_extra_data
+        self.board_fetcher: Fetcher = self._make_fetcher()
         self._pending_adds = PendingAdds()
 
         # Unbound encoders own no value; the handler (the emitter) keeps their
@@ -1071,12 +1074,7 @@ class Modhandler(Handler):
 
                 pb = self.reload_pedalboard(mod_bundle)
                 self.set_current_pedalboard(pb)
-
-                # Stamp as known-good — only pi-stomp knows the full stack is healthy
-                try:
-                    subprocess.Popen(["pistomp-stamp", "stamp", mod_bundle])
-                except Exception:
-                    logging.debug("pistomp-stamp failed", exc_info=True)
+                self._stamp(mod_bundle, None)
             elif mod_bundle and self._current is not None and self.next_pedalboard_preset_index is not None:
                 # Same pedalboard reloaded with a pending snapshot - apply it now
                 logging.info(f"Applying pending snapshot {self.next_pedalboard_preset_index} to current pedalboard")
@@ -1141,16 +1139,38 @@ class Modhandler(Handler):
             sys.exit()
 
         pbs = json.loads(resp.text)
+        self._set_board_list(tuple((pb[Token.TITLE], pb[Token.BUNDLE]) for pb in pbs))
+
+    def _set_board_list(self, boards: tuple[tuple[str, str], ...]) -> None:
         self.pedalboards = {}
         self.pedalboard_list = []
-        for pb in pbs:
-            bundle = pb[Token.BUNDLE]
-            title = pb[Token.TITLE]
+        for title, bundle in boards:
             # Left unhydrated: only the current board's graph is ever read, and
             # hydrating all of them here cost ~10s of startup.
             pedalboard = Pedalboard.Pedalboard(title, bundle, root_uri=self.root_uri, customizer=plugin_lookup)
             self.pedalboards[bundle] = pedalboard
             self.pedalboard_list.append(pedalboard)
+
+    def _make_fetcher(self) -> BoardFetcher:
+        return BoardFetcher(
+            self.root_uri,
+            bundle_fallback=lambda: read_pedalboard_bundle(self.last_json_monitor.path),
+            ttl_reader=plugin_lookup,
+        )
+
+    def _stamp(self, bundle: str | None, previous: str | None) -> None:
+        # Stamp as known-good — only pi-stomp knows the full stack is healthy
+        if not bundle or bundle == previous:
+            return
+        try:
+            subprocess.Popen(["pistomp-stamp", "stamp", bundle])
+        except Exception:
+            logging.debug("pistomp-stamp failed", exc_info=True)
+
+    @staticmethod
+    def _binding_range_of(param: Parameter) -> tuple[float, float] | None:
+        extents = (param.minimum, param.maximum)
+        return extents if extents != param.declared_extents else None
 
     def reload_pedalboard(self, bundle):
         # find the current pedalboard object associated with that bundle
@@ -1179,6 +1199,14 @@ class Modhandler(Handler):
     def set_current_pedalboard(self, pedalboard):
         self._pending_adds.clear()
         pedalboard.hydrate(self.plugin_dict)
+        presets, index = self._read_presets(self.next_pedalboard_preset_index or 0)
+        self.next_pedalboard_preset_index = None
+        self.install_board(pedalboard, presets, index, sync_blend=True)
+
+    def install_board(
+        self, pedalboard: Pedalboard.Pedalboard, presets: dict[int, str], preset_index: int, *, sync_blend: bool = False
+    ) -> None:
+        self._pending_adds.clear()
 
         # Pop non-persisting panels above the first persister (e.g. a parameter
         # dialog or plugin panel is dismissed; the tuner survives).
@@ -1207,10 +1235,8 @@ class Modhandler(Handler):
 
         # Create a new "current"
         self._current = Current(pedalboard)
-
-        if self.next_pedalboard_preset_index is not None:
-            self.current.preset_index = self.next_pedalboard_preset_index
-            self.next_pedalboard_preset_index = None
+        self.current.presets = presets
+        self.current.preset_index = preset_index
 
         # Flush any buffered connect-dump bypass values from the same-tick race
         # (dump drained before last.json reload switched the board).
@@ -1235,7 +1261,6 @@ class Modhandler(Handler):
         # Initialize the data and draw on LCD
         self.bind_current_pedalboard()
         self.bind_volume_encoder()
-        self.load_current_presets()
         self.lcd.link_data(self.pedalboard_list, self.current, self.hardware.footswitches)
         self.lcd.draw_main_panel()
         self.lcd.update_wifi(self.wifi_status)
@@ -1248,46 +1273,126 @@ class Modhandler(Handler):
             logging.warning(f"Failed to send external MIDI messages: {e}")
 
         # Prepare blend modes if configured (snapshot-based activation)
-        try:
-            blend_configs = pedalboard_config.blend_snapshots
-            bundle_path = Path(self.current.pedalboard.bundle)
+        if sync_blend and pedalboard.bundle is not None:
+            try:
+                blend_configs = pedalboard_config.blend_snapshots
+                bundle_path = Path(self.current.pedalboard.bundle)
 
-            # Sync all blend snapshots (create/recreate based on config)
-            snapshot_indices = SnapshotManager.sync_blend_snapshots(bundle_path, blend_configs, self.root_uri)
+                # Sync all blend snapshots (create/recreate based on config)
+                snapshot_indices = SnapshotManager.sync_blend_snapshots(bundle_path, blend_configs, self.root_uri)
 
-            # Create and prepare BlendMode instances for each blend snapshot
-            from blend.manager import BlendMode
+                # Create and prepare BlendMode instances for each blend snapshot
+                from blend.manager import BlendMode
 
-            for blend_cfg in blend_configs:
-                snapshot_name = blend_cfg.get("name")
-                if not snapshot_name:
-                    continue
+                for blend_cfg in blend_configs:
+                    snapshot_name = blend_cfg.get("name")
+                    if not snapshot_name:
+                        continue
 
-                blend_mode = BlendMode(self, blend_cfg)
-                blend_mode.prepare()  # One-time setup: compute diff maps, create controllers
-                self.blend_modes[snapshot_name] = blend_mode
-                logging.info(f"Prepared blend mode: '{snapshot_name}'")
+                    blend_mode = BlendMode(self, blend_cfg)
+                    blend_mode.prepare()  # One-time setup: compute diff maps, create controllers
+                    self.blend_modes[snapshot_name] = blend_mode
+                    logging.info(f"Prepared blend mode: '{snapshot_name}'")
 
-            # Auto-switch to FIRST blend snapshot if any exist
-            if self.blend_modes:
-                first_snapshot_name = list(self.blend_modes.keys())[0]
-                first_snapshot_idx = snapshot_indices.get(first_snapshot_name)
+                # Auto-switch to FIRST blend snapshot if any exist
+                if self.blend_modes:
+                    first_snapshot_name = list(self.blend_modes.keys())[0]
+                    first_snapshot_idx = snapshot_indices.get(first_snapshot_name)
 
-                if first_snapshot_idx is not None:
-                    logging.info(
-                        f"Auto-switching to first blend snapshot: '{first_snapshot_name}' (index {first_snapshot_idx})"
-                    )
-                    self.preset_change(first_snapshot_idx)
-                    # Note: preset_change calls _handle_blend_mode_snapshot_change which activates the blend mode
+                    if first_snapshot_idx is not None:
+                        logging.info(
+                            f"Auto-switching to first blend snapshot: '{first_snapshot_name}' (index {first_snapshot_idx})"
+                        )
+                        self.preset_change(first_snapshot_idx)
+                        # Note: preset_change calls _handle_blend_mode_snapshot_change which activates the blend mode
 
-        except Exception as e:
-            logging.error(f"Failed to prepare blend modes: {e}")
-            self.blend_modes = {}
-            self.active_blend_mode = None
+            except Exception as e:
+                logging.error(f"Failed to prepare blend modes: {e}")
+                self.blend_modes = {}
+                self.active_blend_mode = None
 
         # Caught up with mod-ui.
         self._is_pedalboard_loading = False
         self.hardware.sync_analog_controls()
+
+    def current_board(self) -> Pedalboard.Pedalboard | None:
+        return self._current.pedalboard if self._current is not None else None
+
+    def known_bundles(self) -> frozenset[str]:
+        return frozenset(self.pedalboards)
+
+    def request_board(self, job: BoardJob) -> None:
+        self.board_fetcher.request_board(job)
+
+    def show_loading(self) -> None:
+        if self._lcd is not None:
+            self.lcd.draw_info_message("Loading...")
+
+    def abort_window(self) -> None:
+        self._is_pedalboard_loading = False
+
+    def clear_board(self) -> None:
+        if self._current is None:
+            return
+        self._pending_adds.clear()
+        board = self.current.pedalboard
+        board.plugins, board.connections = [], []
+        board.title, board.bundle = UNTITLED, None
+        self.current.presets, self.current.preset_index = {0: "Default"}, 0
+        for blend_mode in self.blend_modes.values():
+            blend_mode.cleanup()
+        self.blend_modes, self.active_blend_mode = {}, None
+        self.bind_current_pedalboard()
+        self.lcd.draw_main_panel()
+
+    def reconcile_board(self, candidate: Pedalboard.Pedalboard, presets: dict[int, str], preset_index: int) -> None:
+        live = self.current.pedalboard
+        for new in [*candidate.plugins, candidate.transport_plugin]:
+            old = live.find_plugin(new.instance_id)
+            if old is None:
+                continue
+            old.set_bypass(new.is_bypassed())
+            for symbol, param in new.parameters.items():
+                if symbol == BYPASS_SYMBOL:
+                    continue
+                target = old.parameters.get(symbol)
+                if target is None:
+                    continue
+                old.set_param_value(symbol, param.value)
+                if (param.binding, param.minimum, param.maximum) != (target.binding, target.minimum, target.maximum):
+                    self._apply_midi_binding(
+                        old.instance_id, symbol, param.binding or "-1:-1", self._binding_range_of(param)
+                    )
+            if new.customization.extra_data != old.customization.extra_data:
+                old.customization = replace(old.customization, extra_data=new.customization.extra_data)
+            old.pedalboard_snapshot = dict(new.pedalboard_snapshot)
+        live.title = candidate.title
+        self.current.presets, self.current.preset_index = presets, preset_index
+        self.lcd.draw_main_panel()
+
+    def rebase_board(self, bundle: str | None, presets: dict[int, str] | None) -> None:
+        if self._current is None:
+            return
+        board = self.current.pedalboard
+        if presets:
+            self.current.presets = presets
+            if self.current.preset_index not in presets:
+                self.current.preset_index = min(presets)
+        if bundle != board.bundle:
+            previous = board.bundle
+            board.bundle = bundle
+            known = self.pedalboards.get(bundle) if bundle else None
+            board.title = known.title if known is not None else (board.title if bundle else UNTITLED)
+            self.hardware.reinit(config.resolve(self.hardware.default_cfg, bundle))
+            self.bind_current_pedalboard()
+            self.bind_volume_encoder()
+            self._stamp(bundle, previous)
+        self.lcd.draw_main_panel()
+
+    def update_board_list(self, boards: tuple[tuple[str, str], ...]) -> None:
+        self._set_board_list(boards)
+        if self._current is not None:
+            self.lcd.link_data(self.pedalboard_list, self.current, self.hardware.footswitches)
 
     def bind_current_pedalboard(self):
         # "current" being the pedalboard mod-host says is current
@@ -1440,33 +1545,34 @@ class Modhandler(Handler):
             return max(indices)
 
     def load_current_presets(self) -> None:
-        url = self.root_uri + "snapshot/list"
-        resp = self._rest_get(url)
-        if resp is None or resp.status_code != 200:
-            return
-
         if not self._current:
             logging.error("Cannot load presets since current pedalboard is not set")
             return
+        self.current.presets, self.current.preset_index = self._read_presets(self.current.preset_index)
 
-        dict = json.loads(resp.text)
-        for key, name in dict.items():
+    def _read_presets(self, preset_index: int = 0) -> tuple[dict[int, str], int]:
+        presets: dict[int, str] = {}
+        url = self.root_uri + "snapshot/list"
+        resp = self._rest_get(url)
+        if resp is None or resp.status_code != 200:
+            return presets, preset_index
+
+        for key, name in json.loads(resp.text).items():
             if key.isdigit():
-                index = int(key)
-                self.current.presets[index] = name
+                presets[int(key)] = name
 
         # Get current snapshot (preset) info
         url = self.root_uri + "snapshot/name?id=current"  # this will fail (500) for non pi-stomp versions of mod-ui
         resp = self._rest_get(url)
         if resp is None:
-            return
+            return presets, preset_index
 
         if resp.status_code == 200 and resp.text is not None:
             current_snapshot_name = cast(str, util.DICT_GET(json.loads(resp.text), "name"))
-            for i, n in self.current.presets.items():
+            for i, n in presets.items():
                 if n == current_snapshot_name:
-                    self.current.preset_index = i
-                    break
+                    return presets, i
+        return presets, preset_index
 
     def preset_change(self, index):
         if not self._current:

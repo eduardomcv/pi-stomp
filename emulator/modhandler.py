@@ -29,7 +29,6 @@ import os
 from functools import cached_property
 
 import modalapi.pedalboard as Pedalboard
-from modalapi.board_fetch import BoardFetcher
 from modalapi.modhandler import Modhandler
 from modalapi.pedalboard_monitor import FileChangeMonitor
 from modalapi.websocket_bridge import AsyncWebSocketBridge
@@ -70,7 +69,7 @@ class EmulatorModhandler(Modhandler):
         self.ws_bridge = AsyncWebSocketBridge(ws_url="ws://127.0.0.1:18181/websocket")
         self.ws_bridge.start()
         self.board_fetcher.cleanup()
-        self.board_fetcher = BoardFetcher(self.root_uri)
+        self.board_fetcher = self._make_fetcher()
 
         self._window = None
 
