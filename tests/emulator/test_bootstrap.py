@@ -45,7 +45,7 @@ def test_bootstrap_starts_empty_when_nothing_streams(emulator_env):
 
     assert handler.current is not None  # pyright: ignore[reportAttributeAccessIssue]
     assert handler.current.pedalboard.plugins == []  # pyright: ignore[reportAttributeAccessIssue]
-    assert handler.current.pedalboard.title == ""  # pyright: ignore[reportAttributeAccessIssue]
+    assert handler.current.pedalboard.title == "Untitled"  # pyright: ignore[reportAttributeAccessIssue]
     assert not (emulator_env["tmp_path"] / ".pistomp_emulator" / "last.json").exists()
 
     assert handler.hardware is not None

@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 import common.token as Token
+from modalapi.board_sync import UNTITLED
 from pistomp.config import parse
 
 with patch("pistomp.settings.Settings.load_settings"), patch("pistomp.settings.Settings.set_setting"):
@@ -102,7 +103,7 @@ def test_missing_last_json_recovery(tmp_path):
         handler.await_initial_board(timeout_s=5.0, sleep=lambda s: None, clock=lambda: next(ticks))
 
         assert handler.current is not None
-        assert handler.current.pedalboard.title == ""
+        assert handler.current.pedalboard.title == UNTITLED
         assert handler.current.pedalboard.bundle is None
         assert handler.current.pedalboard.plugins == []
         assert not (data_dir / "last.json").exists()

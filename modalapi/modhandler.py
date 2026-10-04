@@ -62,7 +62,7 @@ from common.parameter import BYPASS_SYMBOL, Parameter, PortInfo, Symbol
 from common.param_source import ParamSink
 from common.parameter_editing import EditContext, ParameterSteps, effective_multiplier
 from modalapi.board_fetch import BoardFetcher, BoardJob, BoardResolved, Fetcher, MetadataFetched
-from modalapi.board_sync import UNTITLED, BoardSync
+from modalapi.board_sync import UNTITLED, BoardSync, SyncState
 from modalapi.pending_add import PendingAdds
 from modalapi.plugin import Plugin
 from blend.input_controller import InputController
@@ -134,6 +134,7 @@ from pathlib import Path
 # Front-loaded: mod-ui usually binds its port within ~300ms of us first asking, so the
 # common case costs one short sleep. Tail covers a slow LV2 scan. 4s total, 6 attempts.
 STARTUP_REST_BACKOFF_S = (0.25, 0.25, 0.5, 1.0, 2.0)
+_IN_FLIGHT_GRACE_S = 60.0
 
 
 class LongpressCcKey(namedtuple("LongpressCcKey", ["channel", "cc"])):
@@ -1123,14 +1124,19 @@ class Modhandler(Handler):
         mod-ui's connect dump is already queued by the time hardware and the board
         list are up, so this normally returns on the first pump."""
         deadline = clock() + timeout_s
-        while self._board_sync.applied == 0 and clock() < deadline:
+        hard_cap = deadline + _IN_FLIGHT_GRACE_S
+        while self._board_sync.applied == 0 and (
+            clock() < deadline or (self._board_sync.state is not SyncState.IDLE and clock() < hard_cap)
+        ):
             self.poll_ws_messages()
             if self._board_sync.applied:
                 break
             sleep(0.01)
         if self._current is None:
             logging.warning("no board stream from mod-ui within %.1fs; starting empty", timeout_s)
-            self.set_current_pedalboard(Pedalboard.Pedalboard.empty(self.customizer))
+            board = Pedalboard.Pedalboard.empty(self.customizer)
+            board.title = UNTITLED
+            self.set_current_pedalboard(board)
 
     def set_current_pedalboard(self, pedalboard):
         pedalboard.hydrate(self.plugin_dict)  # removed in Task 7
@@ -1181,6 +1187,8 @@ class Modhandler(Handler):
         self.lcd.link_data(self.pedalboard_list, self.current, self.hardware.footswitches)
         self.lcd.draw_main_panel()
         self.lcd.update_wifi(self.wifi_status)
+        if self.transport_rolling:
+            self.lcd.update_audio_midi_tile()
 
         # Send external MIDI messages for this pedalboard
         # Config was already updated by hardware.reinit(cfg) above
