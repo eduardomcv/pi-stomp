@@ -14,9 +14,9 @@ from tests.v3.nav_helpers import nav_click
 
 
 def _stream_board(system: SystemFixture, board: Pedalboard) -> None:
-    """mod-ui loads `board`: it streams the board's window and then answers its REST queries."""
+    """mod-ui loads `board`: it resets, streams the board's window and then answers its REST queries."""
     serve_board(system, bundle=board.bundle, snapshots={"0": "Default"})
-    play_window(system, board_to_replay_lines(board, empty=False, modified=False, sid=0))
+    play_window(system, ["remove :all", *board_to_replay_lines(board, empty=False, modified=False, sid=0)])
 
 
 def test_v3_pedalboard_change_via_modui(v3_system: SystemFixture, snapshot):

@@ -41,17 +41,27 @@ def _touch_last_json(handler, bundle: str) -> None:
     os.utime(last_json, (9999, 9999))
 
 
+def _load(system: SystemFixture, board: Pedalboard) -> None:
+    """A load as mod-ui streams it: a reset (`remove :all`) first, then the board's window."""
+    serve_board(system, bundle=board.bundle)
+    play_window(system, ["remove :all", *board_to_replay_lines(board, False, False, 0)])
+
+
+def _as_at_process_start(handler) -> None:
+    handler._current = None
+    handler._last_bundle = None
+
+
 class TestStampOnPedalboardChange:
     """pistomp-stamp stamp must be called when mod-ui's stream or a last.json
     refresh moves pi-stomp onto a different bundle."""
 
     def test_stamp_called_on_modui_change(self, v3_system: SystemFixture):
         handler = v3_system.handler
-        serve_board(v3_system, bundle=NEW)
         _touch_last_json(handler, NEW)
 
         with patch("modalapi.modhandler.subprocess.Popen") as mock_run:
-            play_window(v3_system, board_to_replay_lines(Pedalboard("New Rig", NEW), False, False, 0))
+            _load(v3_system, Pedalboard("New Rig", NEW))
             handler.poll_modui_changes()
             handler.poll_modui_changes()
 
@@ -68,6 +78,25 @@ class TestStampOnPedalboardChange:
             handler.poll_modui_changes()
 
         assert handler.current.pedalboard.bundle == NEW
+        _assert_stamp_called(mock_run, times=1)
+
+    def test_a_load_back_and_forth_stamps_each_change_once(self, v3_system: SystemFixture):
+        with patch("modalapi.modhandler.subprocess.Popen") as mock_run:
+            _load(v3_system, Pedalboard("New Rig", NEW))
+            _load(v3_system, Pedalboard("New Rig", NEW))
+            _load(v3_system, Pedalboard("Integration Rig", "/path/to/rig.pedalboard"))
+        assert [c.args[0][2] for c in _stamp_calls(mock_run)] == [NEW, "/path/to/rig.pedalboard"]
+
+    def test_the_first_bundle_after_an_empty_start_is_a_baseline(self, v3_system: SystemFixture):
+        handler = v3_system.handler
+        _as_at_process_start(handler)
+        handler.await_initial_board(timeout_s=0.0, sleep=lambda s: None)
+        assert handler.current.pedalboard.bundle is None
+
+        with patch("modalapi.modhandler.subprocess.Popen") as mock_run:
+            _load(v3_system, Pedalboard("New Rig", NEW))
+            _assert_stamp_not_called(mock_run)
+            _load(v3_system, Pedalboard("Integration Rig", "/path/to/rig.pedalboard"))
         _assert_stamp_called(mock_run, times=1)
 
     def test_no_stamp_on_reconnect_with_unsaved_edits(self, v3_system: SystemFixture):
@@ -91,14 +120,14 @@ class TestStampOnPedalboardChange:
         _assert_stamp_not_called(mock_run)
 
     def test_no_stamp_on_same_pedalboard(self, v3_system: SystemFixture):
-        """Neither a window nor a last.json refresh naming the bundle already
-        loaded may stamp."""
+        """Neither a reload of the bundle already loaded (reset, then its window)
+        nor a last.json refresh naming it may stamp."""
         handler = v3_system.handler
-        rig = handler.current.pedalboard
+        rig = Pedalboard("Integration Rig", "/path/to/rig.pedalboard")
         _touch_last_json(handler, "/path/to/rig.pedalboard")
 
         with patch("modalapi.modhandler.subprocess.Popen") as mock_run:
-            play_window(v3_system, board_to_replay_lines(rig, False, False, 0))
+            _load(v3_system, rig)
             handler.poll_modui_changes()
             handler.poll_modui_changes()
 
@@ -106,8 +135,8 @@ class TestStampOnPedalboardChange:
 
 
 class TestStampOnSetCurrentPedalboard:
-    """set_current_pedalboard stamps only when it replaces a board with a
-    different bundle; never at startup, never for the bundle already current."""
+    """set_current_pedalboard stamps only when its bundle differs from the last
+    bundle shown; the first bundle at startup is the baseline."""
 
     def test_no_stamp_on_the_same_bundle(self, v3_system: SystemFixture):
         handler = v3_system.handler
@@ -118,7 +147,7 @@ class TestStampOnSetCurrentPedalboard:
 
     def test_no_stamp_at_startup(self, v3_system: SystemFixture):
         handler = v3_system.handler
-        handler._current = None
+        _as_at_process_start(handler)
         with patch("modalapi.modhandler.subprocess.Popen") as mock_run:
             handler.set_current_pedalboard(handler.pedalboards[NEW])
         _assert_stamp_not_called(mock_run)

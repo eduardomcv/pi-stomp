@@ -60,8 +60,3 @@ def test_set_current_pedalboard_with_config_file(modhandler_system: SystemFixtur
     handler.set_current_pedalboard(pb)
     assert handler.current
     assert handler.current.pedalboard is pb
-
-
-def test_get_current_pedalboard_bundle_path(modhandler_system: SystemFixture):
-    handler = modhandler_system.handler
-    assert handler.get_current_pedalboard_bundle_path() == "/path/to/rig.pedalboard"

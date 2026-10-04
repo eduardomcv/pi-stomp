@@ -118,11 +118,14 @@ def test_a_window_without_loading_end_is_abandoned_by_the_tick_watchdog(v3_syste
     handler.poll_ws_messages()
     assert handler._is_pedalboard_loading is True
 
+    assert handler.lcd.w_info_msg.text == "Loading..."
+
     now[0] = 31.0
     handler.poll_ws_messages()
 
     assert handler._board_sync.state is SyncState.IDLE
     assert handler._is_pedalboard_loading is False
+    assert handler.lcd.w_info_msg.text == ""
 
 
 def test_a_raising_board_sync_step_is_logged_and_the_loop_carries_on(v3_system, make_plugin, monkeypatch, caplog):
@@ -165,6 +168,7 @@ def test_a_board_that_fails_to_build_is_logged_once_and_live_echoes_still_land(
     handler.poll_ws_messages()
 
     assert caplog.text.count("board sync step failed") == 1
+    assert handler.lcd.w_info_msg.text == ""
     v3_system.ws_bridge.inject("param_set /graph/fuzz :bypass 1.0")
     handler.poll_ws_messages()
     assert plugin.is_bypassed()

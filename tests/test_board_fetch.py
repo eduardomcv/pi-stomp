@@ -298,6 +298,14 @@ def test_resolve_board_strips_a_trailing_slash_and_a_json_string():
             assert resolve_board(ROOT, BoardJob(ticket=1), None, None).bundle == BUNDLE
 
 
+def test_resolve_board_treats_a_body_that_is_not_an_absolute_path_as_a_failed_fetch():
+    for body in ("{}", json.dumps("relative.pedalboard"), "Rig.pedalboard"):
+        with patch("pistomp.httpclient.get", side_effect=_router({"pedalboard/current": (200, body)})):
+            assert resolve_board(ROOT, BoardJob(ticket=1), None, None).bundle_known is False
+            out = resolve_board(ROOT, BoardJob(ticket=1), lambda: BUNDLE, None)
+        assert (out.bundle, out.bundle_known) == (BUNDLE, True)
+
+
 def test_resolve_board_unsaved_board_has_no_bundle_but_is_known():
     with patch("pistomp.httpclient.get", side_effect=_router({"pedalboard/current": (200, "")})):
         out = resolve_board(ROOT, BoardJob(ticket=1), None, None)

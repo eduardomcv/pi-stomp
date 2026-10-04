@@ -93,8 +93,6 @@ def test_missing_last_json_recovery(tmp_path):
         handler.add_lcd(MagicMock())
         handler.load_pedalboards()
 
-        # Precondition: last.json absent → None
-        assert handler.get_current_pedalboard_bundle_path() is None
         assert handler.pedalboard_list
 
         ticks = iter([0.0, 0.0, 6.0, 6.0, 6.0])

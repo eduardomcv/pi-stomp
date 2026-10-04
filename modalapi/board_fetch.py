@@ -139,20 +139,28 @@ def _get_text(root_uri: str, path: str, timeout: float) -> str | None:
         return None
 
 
-def _bundle_of(text: str) -> str | None:
+def _bundle_of(text: str) -> tuple[str | None, bool]:
+    """(bundle, valid): an empty body is mod-ui's unsaved board; anything else must be an absolute path."""
     text = text.strip()
     if text.startswith('"'):
         try:
-            text = str(json.loads(text))
+            text = str(json.loads(text)).strip()
         except ValueError:
-            return None
-    return text.rstrip("/") or None
+            return None, False
+    if not text:
+        return None, True
+    if not text.startswith("/"):
+        return None, False
+    return text.rstrip("/") or None, True
 
 
 def _fetch_bundle(root_uri: str, fallback: Callable[[], str | None] | None) -> tuple[str | None, bool]:
     text = _get_text(root_uri, "pedalboard/current", _GET_TIMEOUT_S)
     if text is not None:
-        return _bundle_of(text), True
+        bundle, valid = _bundle_of(text)
+        if valid:
+            return bundle, True
+        logging.warning("mod-ui pedalboard/current is not a bundle path: %r", text[:80])
     if fallback is not None:
         try:
             bundle = fallback()

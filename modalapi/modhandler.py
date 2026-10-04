@@ -173,6 +173,7 @@ class Modhandler(Handler):
         self.board_fetcher: Fetcher = self._make_fetcher()
         self._pending_adds = PendingAdds()
         self._board_sync = BoardSync(self)
+        self._last_bundle: str | None = None
 
         # Unbound encoders own no value; the handler (the emitter) keeps their
         # MIDI-learn fallback CC, keyed by "channel:CC" so it persists across
@@ -981,12 +982,20 @@ class Modhandler(Handler):
             except Exception as e:
                 logging.error(f"Error applying fetched plugin metadata for {fetched.requested}: {e}")
 
-    @staticmethod
-    def _guarded(step: Callable[..., None], *args: object) -> None:
+    def _guarded(self, step: Callable[..., None], *args: object) -> None:
         try:
             step(*args)
         except Exception:
             logging.exception("board sync step failed")
+            self._dismiss_loading()
+
+    def _dismiss_loading(self) -> None:
+        if self._lcd is None or self._current is None:
+            return
+        try:
+            self.lcd.draw_title()
+        except Exception:
+            logging.exception("cannot clear the loading message")
 
     def _apply_fetched(self, fetched: MetadataFetched) -> None:
         self.plugin_dict.update(fetched.info)
@@ -1112,23 +1121,24 @@ class Modhandler(Handler):
             self.pedalboard_list.append(pedalboard)
 
     def _make_fetcher(self) -> BoardFetcher:
-        return BoardFetcher(
-            self.root_uri,
-            bundle_fallback=lambda: read_pedalboard_bundle(self.last_json_monitor.path),
-            ttl_reader=plugin_lookup,
-        )
+        return BoardFetcher(self.root_uri, bundle_fallback=self._bundle_fallback(), ttl_reader=plugin_lookup)
 
-    def _stamp(self, bundle: str | None, previous: str | None) -> None:
-        # Stamp as known-good — only pi-stomp knows the full stack is healthy
-        if not bundle or bundle == previous:
+    def _bundle_fallback(self) -> Callable[[], str | None] | None:
+        return lambda: read_pedalboard_bundle(self.last_json_monitor.path)
+
+    def _track_bundle(self, bundle: str | None, *, stamp: bool) -> None:
+        # Stamp as known-good — only pi-stomp knows the full stack is healthy. mod-ui's reset
+        # before each load nulls the board's bundle, so compare with the last bundle shown.
+        if not bundle or bundle == self._last_bundle:
+            return
+        baseline = self._last_bundle is None
+        self._last_bundle = bundle
+        if not stamp or baseline:
             return
         try:
             subprocess.Popen(["pistomp-stamp", "stamp", bundle])
         except Exception:
             logging.debug("pistomp-stamp failed", exc_info=True)
-
-    def get_current_pedalboard_bundle_path(self):
-        return read_pedalboard_bundle(self.last_json_monitor.path)
 
     def await_initial_board(
         self,
@@ -1162,16 +1172,7 @@ class Modhandler(Handler):
         self, board: Pedalboard.Pedalboard, presets: dict[int, str], preset_index: int, *, sync_blend: bool = False
     ) -> None:
         self._pending_adds.clear()
-        previous = self.current_board()
-
-        # Pop non-persisting panels above the first persister (e.g. a parameter
-        # dialog or plugin panel is dismissed; the tuner survives).
-        pstack = self.lcd.pstack
-        while pstack.current is not None:
-            top = pstack.current
-            if top.should_persist_on_board_change():
-                break
-            pstack.pop_panel(top)
+        self._pop_board_panels()
 
         # Cleanup all previous blend modes if active
         for blend_mode in self.blend_modes.values():
@@ -1185,11 +1186,7 @@ class Modhandler(Handler):
 
         if self._current is not None:
             self._current.close()
-
-        # Delete previous "current"
-        del self._current
-
-        # Create a new "current"
+        self._current = None
         self._current = Current(board)
         self.current.presets = dict(presets)
         self.current.preset_index = preset_index
@@ -1201,9 +1198,11 @@ class Modhandler(Handler):
         self.bind_current_pedalboard()
         self.bind_volume_encoder()
         self.lcd.link_data(self.pedalboard_list, self.current, self.hardware.footswitches)
+        new_audio_midi_tile = self.lcd.w_eq is None
         self.lcd.draw_main_panel()
         self.lcd.update_wifi(self.wifi_status)
-        if self.transport_rolling:
+        # A transport that preceded the first board found no tile to paint; later ones repaint it themselves.
+        if new_audio_midi_tile and self.transport_rolling:
             self.lcd.update_audio_midi_tile()
 
         # Send external MIDI messages for this pedalboard
@@ -1255,8 +1254,17 @@ class Modhandler(Handler):
         # Caught up with mod-ui.
         self._is_pedalboard_loading = False
         self.hardware.sync_analog_controls()
-        if sync_blend and previous is not None:
-            self._stamp(board.bundle, previous.bundle)
+        self._track_bundle(board.bundle, stamp=sync_blend)
+
+    def _pop_board_panels(self) -> None:
+        # Pop non-persisting panels above the first persister (e.g. a parameter
+        # dialog or plugin panel is dismissed; the tuner survives).
+        pstack = self.lcd.pstack
+        while pstack.current is not None:
+            top = pstack.current
+            if top.should_persist_on_board_change():
+                break
+            pstack.pop_panel(top)
 
     def current_board(self) -> Pedalboard.Pedalboard | None:
         return self._current.pedalboard if self._current is not None else None
@@ -1273,11 +1281,17 @@ class Modhandler(Handler):
 
     def abort_window(self) -> None:
         self._is_pedalboard_loading = False
+        self._dismiss_loading()
+
+    def board_title(self, bundle: str) -> str | None:
+        known = self.pedalboards.get(bundle)
+        return known.title if known is not None else None
 
     def clear_board(self) -> None:
         if self._current is None:
             return
         self._pending_adds.clear()
+        self._pop_board_panels()
         board = self.current.pedalboard
         board.plugins, board.connections = [], []
         board.title, board.bundle = UNTITLED, None
@@ -1287,7 +1301,8 @@ class Modhandler(Handler):
         self.blend_modes, self.active_blend_mode = {}, None
         board.transport_plugin = board._build_transport_plugin(None)
         self.bind_current_pedalboard()
-        self.lcd.draw_main_panel()
+        # A menu load's reset arrives before its window; the swap, not this, must land the selection.
+        self.lcd.draw_main_panel(reselect=False)
 
     def reconcile_board(self, candidate: Pedalboard.Pedalboard, presets: dict[int, str], preset_index: int) -> None:
         live = self.current.pedalboard
@@ -1313,6 +1328,8 @@ class Modhandler(Handler):
                 old.customization = replace(old.customization, extra_data=new.customization.extra_data)
                 renamed = True
             old.pedalboard_snapshot = dict(new.pedalboard_snapshot)
+            old.canvas_x, old.canvas_y = new.canvas_x, new.canvas_y
+        live.plugins.sort(key=lambda p: (p.canvas_x, p.canvas_y, p.instance_id))
         live.title = candidate.title
         moved = preset_index != self.current.preset_index
         self.current.presets, self.current.preset_index = dict(presets), preset_index
@@ -1321,9 +1338,9 @@ class Modhandler(Handler):
                 self._handle_blend_mode_snapshot_change(preset_index)
             except Exception as e:
                 logging.error(f"Blend mode update on reconcile failed: {e}")
-        # Tiles follow bypass and values themselves; a full redraw would move the selection to the wrench.
+        # Tiles follow bypass and values themselves.
         if renamed:
-            self.lcd.draw_main_panel()
+            self.lcd.draw_main_panel(reselect=False)
         else:
             self.lcd.draw_title()
 
@@ -1335,16 +1352,22 @@ class Modhandler(Handler):
             self.current.presets = dict(presets)
             if self.current.preset_index not in presets:
                 self.current.preset_index = min(presets)
-        if bundle != board.bundle:
-            previous = board.bundle
-            board.bundle = bundle
-            known = self.pedalboards.get(bundle) if bundle else None
-            board.title = known.title if known is not None else (board.title if bundle else UNTITLED)
-            self.hardware.reinit(config.resolve(self.hardware.default_cfg, bundle))
-            self.bind_current_pedalboard()
-            self.bind_volume_encoder()
-            self._stamp(bundle, previous)
-        self.lcd.draw_main_panel()
+        if bundle == board.bundle:
+            self.lcd.draw_title()
+            return
+        board.bundle = bundle
+        known = self.pedalboards.get(bundle) if bundle else None
+        board.title = known.title if known is not None else (board.title if bundle else UNTITLED)
+        self.hardware.reinit(config.resolve(self.hardware.default_cfg, bundle))
+        self.bind_current_pedalboard()
+        self.bind_volume_encoder()
+        try:
+            self.external_midi.send_messages_for_pedalboard()
+        except Exception as e:
+            logging.warning(f"Failed to send external MIDI messages: {e}")
+        self._track_bundle(bundle, stamp=True)
+        self.lcd.draw_main_panel(reselect=False)
+        self.hardware.sync_analog_controls()
 
     def update_board_list(self, boards: tuple[tuple[str, str], ...]) -> None:
         self._set_board_list(boards)

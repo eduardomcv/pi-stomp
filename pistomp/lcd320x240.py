@@ -237,13 +237,13 @@ class Lcd:
         self.current = current
         self.footswitches = footswitches
 
-    def draw_main_panel(self):
+    def draw_main_panel(self, *, reselect: bool = True):
         self.draw_tools(None, None, None, None)
         self.draw_title()
-        if self._is_pedalboard_load:
+        if reselect and self._is_pedalboard_load:
             self._is_pedalboard_load = False
             self.main_panel.sel_widget(self.w_pedalboard)
-        else:
+        elif reselect:
             self.main_panel.sel_widget(self.w_wrench)
         self.draw_analog_assignments(self.current.analog_controllers)
         self.draw_plugins()

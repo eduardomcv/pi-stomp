@@ -80,6 +80,7 @@ class BoardHost(Protocol):
 
     def current_board(self) -> Pedalboard | None: ...
     def known_bundles(self) -> frozenset[str]: ...
+    def board_title(self, bundle: str) -> str | None: ...
     def request_board(self, job: BoardJob) -> None: ...
     def show_loading(self) -> None: ...
     def abort_window(self) -> None: ...
@@ -116,6 +117,7 @@ class BoardSync:
         self._transport: TransportMessage | None = None
         self._snapshot: PedalSnapshotMessage | None = None
         self._rebase_ticket: int | None = None
+        self._rebase_deadline = 0.0
         self._rebase_again = False
         self.applied = 0
 
@@ -166,7 +168,10 @@ class BoardSync:
                 return False
 
     def poll(self) -> None:
-        if self._state is SyncState.IDLE or self._clock() < self._deadline:
+        if self._state is SyncState.IDLE:
+            self._expire_rebase()
+            return
+        if self._clock() < self._deadline:
             return
         if self._state is SyncState.BUILDING:
             logging.warning("board window never ended; abandoning it")
@@ -176,6 +181,15 @@ class BoardSync:
             logging.warning("board resolution timed out; building with what the stream gave")
             self._complete(BoardResolved.failed(self._ticket))
 
+    def _expire_rebase(self) -> None:
+        if self._rebase_ticket is None or self._clock() < self._rebase_deadline:
+            return
+        logging.warning("board rebase timed out; dropping it")
+        self._rebase_ticket = None
+        if self._rebase_again:
+            self._rebase_again = False
+            self.request_rebase()
+
     def request_rebase(self) -> None:
         if self._state is not SyncState.IDLE:
             return
@@ -184,6 +198,7 @@ class BoardSync:
             return
         self._ticket += 1
         self._rebase_ticket = self._ticket
+        self._rebase_deadline = self._clock() + _RESOLVE_TIMEOUT_S
         self._host.request_board(BoardJob(self._ticket, known_bundles=self._host.known_bundles()))
 
     def on_resolved(self, result: BoardResolved) -> None:
@@ -238,8 +253,12 @@ class BoardSync:
             presets[index] = presets.get(index, self._snapshot.snapshot_name)
         if index not in presets:
             index = min(presets)
+        if result.boards is not None:
+            host.update_board_list(result.boards)
+        # mod-ui before TreeFallSound's loading_end title, and stock MOD Desktop, stream no title.
+        title = spec.title or (host.board_title(bundle) if bundle is not None else None) or UNTITLED
         candidate = Pedalboard.from_spec(
-            spec, host.plugin_dict, bundle, spec.title or UNTITLED, self._transport, host.customizer, host.patch_parser
+            spec, host.plugin_dict, bundle, title, self._transport, host.customizer, host.patch_parser
         )
         for instance, extra in result.extra_data.items():
             plugin = candidate.find_plugin(instance)
@@ -249,8 +268,6 @@ class BoardSync:
         in_place = current is not None and current.bundle == candidate.bundle and same_structure(current, candidate)
         sync_blend = self._sync_blend(spec, bundle)
         self.applied += 1
-        if result.boards is not None:
-            host.update_board_list(result.boards)
         if in_place:
             host.reconcile_board(candidate, presets, index)
         else:

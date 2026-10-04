@@ -45,6 +45,7 @@ def _candidate_from(system: SystemFixture) -> Pedalboard:
             live.instance_id, parameters, live.info, live.category, uri=live.uri, customization=live.customization
         )
         plugin.pedalboard_snapshot = dict(live.pedalboard_snapshot)
+        plugin.canvas_x, plugin.canvas_y = live.canvas_x, live.canvas_y
         candidate.plugins.append(plugin)
     candidate.connections = list(board.connections)
     return candidate
@@ -317,3 +318,107 @@ def test_abort_window_clears_the_loading_flag(parallel_beths_system):
     handler._is_pedalboard_loading = True
     handler.abort_window()
     assert handler._is_pedalboard_loading is False
+
+
+def _select_a_tile(handler):
+    tile = handler.lcd.w_plugins[1]
+    handler.lcd.main_panel.sel_widget(tile)
+    return tile
+
+
+def test_clear_board_pops_a_panel_bound_to_the_removed_plugins(parallel_beths_system):
+    handler = parallel_beths_system.handler
+    panel = _open_a_plugin_panel(handler)
+
+    handler.clear_board()
+
+    assert handler.lcd.pstack.current is handler.lcd.main_panel
+    assert panel not in handler.lcd.pstack.stack
+
+
+def test_clear_board_keeps_the_selection_and_a_pending_menu_load(parallel_beths_system):
+    handler = parallel_beths_system.handler
+    lcd = handler.lcd
+    lcd.main_panel.sel_widget(lcd.w_pedalboard)
+    lcd._is_pedalboard_load = True
+
+    handler.clear_board()
+
+    assert lcd.main_panel.sel_ref is lcd.w_pedalboard
+    assert lcd._is_pedalboard_load is True
+
+
+def test_rebase_to_the_same_bundle_keeps_the_selection(parallel_beths_system):
+    handler = parallel_beths_system.handler
+    tile = _select_a_tile(handler)
+    handler.rebase_board(handler.current.pedalboard.bundle, {0: "Default", 1: "Two"})
+    assert handler.lcd.main_panel.sel_ref is tile
+
+
+def test_rebase_to_a_new_bundle_keeps_the_selection_and_resends_the_board_state(parallel_beths_system, monkeypatch):
+    handler = parallel_beths_system.handler
+    lcd = handler.lcd
+    lcd.main_panel.sel_widget(lcd.w_pedalboard)
+    calls = []
+    monkeypatch.setattr(handler.external_midi, "send_messages_for_pedalboard", lambda: calls.append("midi"))
+    monkeypatch.setattr(handler.hardware, "sync_analog_controls", lambda: calls.append("analog"))
+
+    handler.rebase_board("/data/.pedalboards/SavedAs.pedalboard", None)
+
+    assert lcd.main_panel.sel_ref is lcd.w_pedalboard
+    assert calls == ["midi", "analog"]
+
+
+def test_reconcile_adopts_the_streamed_canvas_positions(parallel_beths_system):
+    handler = parallel_beths_system.handler
+    candidate = _candidate_from(parallel_beths_system)
+    for i, plugin in enumerate(candidate.plugins):
+        plugin.canvas_x, plugin.canvas_y = 1000.0 + i, 7.0
+    live = list(handler.current.pedalboard.plugins)
+
+    handler.reconcile_board(candidate, {0: "Default"}, 0)
+
+    assert handler.current.pedalboard.plugins == live
+    assert [(p.canvas_x, p.canvas_y) for p in live] == [(1000.0 + i, 7.0) for i in range(len(live))]
+
+
+def test_install_board_never_leaves_the_current_attribute_missing(parallel_beths_system, monkeypatch):
+    handler = parallel_beths_system.handler
+
+    def broken(_board):
+        raise RuntimeError("Current failed")
+
+    monkeypatch.setattr("modalapi.modhandler.Current", broken)
+    with pytest.raises(RuntimeError):
+        handler.install_board(Pedalboard.empty(handler.customizer), {0: "Default"}, 0)
+    assert handler._current is None
+
+
+def test_install_board_refreshes_an_existing_audio_midi_tile_only_through_the_transport(
+    parallel_beths_system, monkeypatch
+):
+    handler = parallel_beths_system.handler
+    refreshes = []
+    monkeypatch.setattr(handler.lcd, "update_audio_midi_tile", lambda: refreshes.append(1))
+    handler.transport_rolling = True
+
+    handler.install_board(Pedalboard.empty(handler.customizer), {0: "Default"}, 0)
+    handler.install_board(Pedalboard.empty(handler.customizer), {0: "Default"}, 0)
+
+    assert refreshes == []
+
+
+def test_abort_window_clears_the_loading_message(parallel_beths_system):
+    handler = parallel_beths_system.handler
+    handler.show_loading()
+    handler.show_loading()
+    assert handler.lcd.w_info_msg.text == "Loading..."
+    handler.abort_window()
+    assert handler.lcd.w_info_msg.text == ""
+
+
+def test_board_title_reads_the_board_list(parallel_beths_system):
+    handler = parallel_beths_system.handler
+    handler.update_board_list((("One", "/b/one.pedalboard"),))
+    assert handler.board_title("/b/one.pedalboard") == "One"
+    assert handler.board_title("/b/none.pedalboard") is None

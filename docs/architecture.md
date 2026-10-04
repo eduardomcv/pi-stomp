@@ -328,12 +328,19 @@ into the model.
   put. Otherwise `install_board` swaps it in: it pops panels that do not persist across
   boards, closes the old `Current`, reinits hardware from the new bundle's config,
   rebinds controllers and redraws. `install_board` also clears
-  `_is_pedalboard_loading`.
-- **Rebase.** Saving, renaming or save-as changes the bundle and snapshot list
-  without opening a window. A `last.json` mtime change while `IDLE` requests a rebase:
-  a job with no metadata to fetch, applied by `rebase_board` (new bundle, title,
-  snapshots, config reinit, board list refresh). One rebase is in flight at a time;
-  further requests coalesce into one follow-up. A window opening cancels it.
+  `_is_pedalboard_loading`. mod-ui resets (`remove :all`) before every load, so a
+  desktop reload of the same board normally swaps (closing an open panel); reconcile in
+  place is reached on reconnect replays.
+- **Title.** The window's `loading_end` title wins. Stock MOD Desktop and older mod-ui
+  send none; then the title the board list holds for the resolved bundle is used, else
+  "Untitled".
+- **Rebase.** Save and save-as write `last.json` without opening a window. A
+  `last.json` mtime change while `IDLE` requests a rebase: a job with no metadata to
+  fetch, applied by `rebase_board`. It always refreshes the snapshot list (and the
+  board list for an unknown bundle); only when the bundle changed does it retitle from
+  the board list, reinit hardware from the new config and resend the board's external
+  MIDI. One rebase is in flight at a time; further requests coalesce into one
+  follow-up, a result lost for 30 s is dropped, and a window opening cancels it.
 - **Blend gate.** Blend snapshot sync (which writes snapshot entries into MOD) runs
   only when the bundle is known and the window was a board load, or a replay of a board
   with no unsaved edits.

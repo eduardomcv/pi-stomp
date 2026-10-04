@@ -26,6 +26,7 @@ Requires MOD Desktop running locally at http://127.0.0.1:18181.
 
 import logging
 import os
+from collections.abc import Callable
 from functools import cached_property
 
 from modalapi.modhandler import Modhandler
@@ -43,10 +44,7 @@ class EmulatorModhandler(Modhandler):
         os.makedirs(emu_data_dir, exist_ok=True)
         self.data_dir = emu_data_dir
         self.banks_file = os.path.join(emu_data_dir, "banks.json")
-        self.pedalboard_modification_file = os.path.join(emu_data_dir, "last.json")
         self.last_json_monitor = FileChangeMonitor(os.path.join(emu_data_dir, "last.json"))
-        self.pedalboard_change_timestamp = 0
-        self.banks_file_timestamp = 0
 
         # Repoint Settings at the emulator's config dir so changes persist across restarts.
         emu_cfg_dir = os.path.join(emu_data_dir, "config")
@@ -74,6 +72,10 @@ class EmulatorModhandler(Modhandler):
 
     def set_window(self, window):
         self._window = window
+
+    def _bundle_fallback(self) -> Callable[[], str | None] | None:
+        # Nothing writes the emulator's last.json; MOD Desktop's REST answer is the only source.
+        return None
 
     # -------------------------------------------------------------------------
     # Skip Pi-only system calls

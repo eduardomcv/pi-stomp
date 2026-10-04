@@ -15,6 +15,7 @@ from tests.board_window import play_window, serve_board
 from tests.fake_board_fetcher import FakeBoardFetcher
 from tests.replay_helpers import load_plugin_info, load_replay
 from tests.types import SystemFixture
+from tests.v3.nav_helpers import nav_click
 from tests.v3.test_dynamic_pedalboard import (
     _EXTRA_CHORUS_INFO,
     _EXTRA_CHORUS_URI,
@@ -125,7 +126,9 @@ def test_new_board_after_remove_all_shows_an_empty_untitled_board(v3_system, sna
     snapshot("untitled")
 
 
-def test_same_bundle_reload_with_the_same_structure_keeps_the_open_panel(v3_system, snapshot):
+def test_a_reconnect_replay_of_the_same_board_keeps_the_open_panel(v3_system, snapshot):
+    """A reconnect replays the board mod-ui holds (`:connected`, no reset): same bundle and
+    structure, so it reconciles in place."""
     system = v3_system
     handler = system.handler
     lines = _install_fixture_board(system)
@@ -141,6 +144,53 @@ def test_same_bundle_reload_with_the_same_structure_keeps_the_open_panel(v3_syst
     assert all(a is b for a, b in zip(handler.current.pedalboard.plugins, plugins))
     assert handler.lcd.pstack.current is panel
     snapshot("panel_kept")
+
+
+def test_a_desktop_reload_of_the_same_board_swaps_and_pops_the_panel(v3_system):
+    """mod-ui resets before every load, so a reload of the same board arrives as `remove :all`
+    and a fresh window: the reset empties the board, and the window swaps a new one in."""
+    system = v3_system
+    handler = system.handler
+    _install_fixture_board(system)
+    plugins = list(handler.current.pedalboard.plugins)
+    panel = _open_a_plugin_panel(system)
+
+    play_window(system, load_replay("reset_then_load.txt"))
+
+    assert handler.current.pedalboard.bundle == BUNDLE
+    assert _ids(system) == FIXTURE_IDS
+    assert not any(new is old for new in handler.current.pedalboard.plugins for old in plugins)
+    assert panel not in handler.lcd.pstack.stack
+    assert handler.lcd.pstack.current is handler.lcd.main_panel
+
+
+def test_an_lcd_menu_load_lands_the_selection_on_the_pedalboard_title_and_keeps_it(v3_system, nav_handler):
+    system = v3_system
+    handler = system.handler
+    lcd = handler.lcd
+    handler.plugin_dict.update(load_plugin_info())
+    chosen = "/path/to/new.pedalboard"
+    nav_handler(1)
+    nav_click(handler)
+    nav_handler(1)
+    nav_click(handler)
+    assert lcd._is_pedalboard_load is True
+    serve_board(system, bundle=chosen, snapshots=SNAPSHOTS)
+
+    play_window(system, load_replay("reset_then_load.txt"))
+
+    assert handler.current.pedalboard.bundle == chosen
+    assert lcd.main_panel.sel_ref is lcd.w_pedalboard
+    assert lcd._is_pedalboard_load is False
+
+    last_json = Path(handler.data_dir) / "last.json"
+    last_json.write_text(json.dumps({"pedalboard": chosen}))
+    os.utime(last_json, (9999, 9999))
+    handler.poll_modui_changes()
+    handler.poll_modui_changes()
+
+    assert _fetcher(system).board_jobs[-1].uris == ()
+    assert lcd.main_panel.sel_ref is lcd.w_pedalboard
 
 
 def test_a_changed_structure_swaps_and_pops_the_panel(v3_system, snapshot):
@@ -182,6 +232,7 @@ def test_reconnect_with_unsaved_edits_applies_the_live_board_without_blend_stamp
     assert any(line.startswith("loading_start 1 1") for line in lines)
     system.mock_get.reset_mock(side_effect=False)
     system.mock_post.reset_mock(side_effect=False)
+    popen.reset_mock()
 
     play_window(system, [CONNECTED_MARKER, *lines])
 

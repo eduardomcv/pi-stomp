@@ -28,6 +28,7 @@ class FakeHost:
         self.patch_parser: PatchParser = _patch_none
         self.board = board
         self.bundles: frozenset[str] = frozenset()
+        self.titles: dict[str, str] = {}
         self.calls: list[tuple] = []
 
     @property
@@ -48,6 +49,9 @@ class FakeHost:
 
     def known_bundles(self) -> frozenset[str]:
         return self.bundles
+
+    def board_title(self, bundle: str) -> str | None:
+        return self.titles.get(bundle)
 
     def request_board(self, job: BoardJob) -> None:
         self.calls.append(("request", job))
@@ -72,6 +76,7 @@ class FakeHost:
         self.calls.append(("rebase", bundle, presets))
 
     def update_board_list(self, boards: tuple[tuple[str, str], ...]) -> None:
+        self.titles = {bundle: title for title, bundle in boards}
         self.calls.append(("boards", boards))
 
     def kinds(self) -> list[str]:
@@ -212,6 +217,45 @@ def test_an_empty_streamed_title_is_untitled():
     sync = BoardSync(host, Clock())
     job = _window(sync, host, "connect_dump_unsaved.txt")
     sync.on_resolved(_resolved(job.ticket, bundle=None))
+    assert host.installed.title == UNTITLED
+
+
+def _untitled_window(sync: BoardSync, host: FakeHost) -> BoardJob:
+    _feed(sync, ["loading_start 0 0", "loading_end 0"])
+    return [c[1] for c in host.calls if c[0] == "request"][-1]
+
+
+def test_an_untitled_stream_takes_the_title_the_board_list_knows():
+    host = FakeHost()
+    host.titles = {BUNDLE: "Listed Rig"}
+    sync = BoardSync(host, Clock())
+    job = _untitled_window(sync, host)
+    sync.on_resolved(_resolved(job.ticket))
+    assert host.installed.title == "Listed Rig"
+
+
+def test_an_untitled_stream_takes_the_title_from_the_list_its_own_result_refreshed():
+    host = FakeHost()
+    sync = BoardSync(host, Clock())
+    job = _untitled_window(sync, host)
+    sync.on_resolved(_resolved(job.ticket, boards=(("Fresh Rig", BUNDLE),)))
+    assert host.installed.title == "Fresh Rig"
+
+
+def test_a_streamed_title_wins_over_the_board_list():
+    host = FakeHost()
+    host.titles = {BUNDLE: "Listed Rig"}
+    sync = BoardSync(host, Clock())
+    job = _window(sync, host)
+    sync.on_resolved(_resolved(job.ticket))
+    assert host.installed.title == "Fixture Rig"
+
+
+def test_an_untitled_stream_on_a_bundle_the_list_lacks_is_untitled():
+    host = FakeHost()
+    sync = BoardSync(host, Clock())
+    job = _untitled_window(sync, host)
+    sync.on_resolved(_resolved(job.ticket))
     assert host.installed.title == UNTITLED
 
 
@@ -448,6 +492,35 @@ def test_a_rebase_requested_while_one_is_in_flight_runs_again_after_it():
     assert host.kinds() == ["request", "rebase", "request", "rebase"]
     sync.request_rebase()
     assert host.kinds().count("request") == 3
+
+
+def test_a_lost_rebase_result_expires_and_a_later_rebase_runs():
+    clock, host = Clock(), FakeHost()
+    sync = BoardSync(host, clock)
+    sync.request_rebase()
+    lost = host.calls[-1][1]
+    clock.now = 29.0
+    sync.poll()
+    sync.request_rebase()
+    assert host.kinds() == ["request"]
+    clock.now = 61.0
+    sync.poll()
+    assert host.kinds() == ["request", "request"]
+    sync.on_resolved(_resolved(lost.ticket))
+    assert "rebase" not in host.kinds()
+    sync.on_resolved(_resolved(host.calls[-1][1].ticket))
+    assert host.kinds() == ["request", "request", "rebase"]
+
+
+def test_an_expired_rebase_with_nothing_coalesced_frees_the_next_request():
+    clock, host = Clock(), FakeHost()
+    sync = BoardSync(host, clock)
+    sync.request_rebase()
+    clock.now = 31.0
+    sync.poll()
+    assert host.kinds() == ["request"]
+    sync.request_rebase()
+    assert host.kinds() == ["request", "request"]
 
 
 def test_a_window_cancels_a_rebase_in_flight():
